@@ -642,13 +642,11 @@ dependencies = [
  "dashmap",
  "jwalk",
  "parking_lot",
- "rayon",
  "serde",
  "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
- "thiserror 1.0.69",
  "tokio",
 ]
 

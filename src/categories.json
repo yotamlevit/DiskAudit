@@ -1,0 +1,72 @@
+{
+  "video": {
+    "label": "Video",
+    "color": "#ef4444",
+    "exts": ["mp4", "mov", "avi", "mkv", "webm", "m4v", "wmv", "flv", "mpg", "mpeg"]
+  },
+  "image": {
+    "label": "Image",
+    "color": "#3b82f6",
+    "exts": ["jpg", "jpeg", "png", "heic", "heif", "gif", "webp", "svg", "bmp", "tiff", "tif", "raw", "cr2", "arw", "nef", "dng", "icns", "ico", "psd", "ai"]
+  },
+  "audio": {
+    "label": "Audio",
+    "color": "#a855f7",
+    "exts": ["mp3", "m4a", "wav", "flac", "ogg", "aac", "aif", "aiff", "opus"]
+  },
+  "archive": {
+    "label": "Archive",
+    "color": "#f59e0b",
+    "exts": ["zip", "tar", "gz", "bz2", "xz", "7z", "rar", "tgz", "zst", "pkg", "xip", "jar", "asar", "ipsw", "br", "lz4"]
+  },
+  "document": {
+    "label": "Document",
+    "color": "#06b6d4",
+    "exts": ["pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "pages", "numbers", "key", "odt", "rtf", "epub", "mobi"]
+  },
+  "code": {
+    "label": "Code",
+    "color": "#22c55e",
+    "exts": ["ts", "tsx", "js", "jsx", "mjs", "cjs", "py", "rs", "go", "c", "cpp", "cc", "cxx", "h", "hpp", "java", "swift", "kt", "rb", "php", "sh", "bash", "zsh", "lua", "scala", "clj", "ex", "erl", "elm", "dart", "vue", "svelte"]
+  },
+  "data": {
+    "label": "Database",
+    "color": "#ec4899",
+    "exts": ["db", "sqlite", "sqlite3", "sqlite-wal", "sqlite-shm", "mdb", "parquet", "arrow", "feather", "h5", "hdf5", "npy", "npz", "realm"]
+  },
+  "diskimage": {
+    "label": "Disk image",
+    "color": "#dc2626",
+    "exts": ["dmg", "iso", "img", "qcow2", "vmdk", "vdi", "vhd", "vhdx", "sparseimage", "sparsebundle"]
+  },
+  "binary": {
+    "label": "Binary",
+    "color": "#84cc16",
+    "exts": ["exe", "dylib", "so", "a", "o", "obj", "lib", "wasm", "bin", "car", "metallib"]
+  },
+  "text": {
+    "label": "Text/markup",
+    "color": "#14b8a6",
+    "exts": ["txt", "md", "json", "xml", "yml", "yaml", "csv", "tsv", "html", "htm", "css", "scss", "less", "toml", "ini", "conf", "log", "plist"]
+  },
+  "cache": {
+    "label": "Cache/build",
+    "color": "#6b7280",
+    "exts": ["cache", "tmp", "lock", "pyc", "class", "pak", "swp", "bak"]
+  },
+  "font": {
+    "label": "Font",
+    "color": "#f472b6",
+    "exts": ["ttf", "otf", "woff", "woff2", "eot"]
+  },
+  "noext": {
+    "label": "No extension",
+    "color": "#475569",
+    "exts": []
+  },
+  "other": {
+    "label": "Other",
+    "color": "#94a3b8",
+    "exts": []
+  }
+}

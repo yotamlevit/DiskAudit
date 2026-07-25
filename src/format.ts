@@ -1,11 +1,15 @@
+// Sizes are formatted the way macOS does: DECIMAL units (1 KB = 1000 bytes),
+// so DiskAudit's numbers line up with Finder and Get Info. (The app measures
+// allocated blocks, so totals can still differ from Finder's logical sizes —
+// see README — but the unit convention matches.)
 export function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes < 0) return "0 B";
-  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1000) return `${Math.round(bytes)} B`;
   const units = ["KB", "MB", "GB", "TB", "PB"];
-  let v = bytes / 1024;
+  let v = bytes / 1000;
   let i = 0;
-  while (v >= 1024 && i < units.length - 1) {
-    v /= 1024;
+  while (v >= 1000 && i < units.length - 1) {
+    v /= 1000;
     i++;
   }
   const decimals = v >= 100 ? 0 : v >= 10 ? 1 : 2;

@@ -1,42 +1,27 @@
-import { useMemo } from "react";
-import type { ScanResult } from "./types";
+import type { ScanDone } from "./types";
 import { formatBytes, formatNumber } from "./format";
-import { CATEGORIES, categoryForExt, colorForExt, Category } from "./categories";
+import { CATEGORIES, colorForExt, isCategory, categorize } from "./categories";
 
 interface StatsProps {
-  result: ScanResult;
+  summary: ScanDone;
 }
 
-export default function Stats({ result }: StatsProps) {
-  const { stats, total_bytes } = result;
-
-  // Aggregate by category from the per-extension stats.
-  const byCategory = useMemo(() => {
-    const m = new Map<Category, { count: number; size: number }>();
-    for (const e of stats.by_extension) {
-      const cat = categoryForExt(e.ext);
-      const cur = m.get(cat) ?? { count: 0, size: 0 };
-      cur.count += e.count;
-      cur.size += e.size;
-      m.set(cat, cur);
-    }
-    return Array.from(m.entries())
-      .map(([cat, v]) => ({ cat, ...v }))
-      .sort((a, b) => b.size - a.size);
-  }, [stats]);
-
-  const totalShown = total_bytes || 1;
+export default function Stats({ summary }: StatsProps) {
+  const { stats, allocated_bytes } = summary;
+  const total = allocated_bytes || 1;
 
   return (
     <div className="stats-root">
       <section className="stats-section">
         <h3>By category</h3>
         <div className="cat-bar-list">
-          {byCategory.map(({ cat, count, size }) => {
-            const pct = (size / totalShown) * 100;
-            const def = CATEGORIES[cat];
+          {stats.by_category.map(({ category, count, size }) => {
+            const pct = (size / total) * 100;
+            const def = isCategory(category)
+              ? CATEGORIES[category]
+              : { label: category, color: "var(--fg-3)" };
             return (
-              <div className="cat-bar-row" key={cat}>
+              <div className="cat-bar-row" key={category}>
                 <div className="cat-bar-meta">
                   <span
                     className="cat-bar-swatch"
@@ -64,6 +49,13 @@ export default function Stats({ result }: StatsProps) {
             );
           })}
         </div>
+        {summary.hardlink_saved_bytes > 0 && (
+          <div className="stats-note">
+            {formatBytes(summary.hardlink_saved_bytes)} of hardlinked content
+            counted once. Logical size of all files:{" "}
+            {formatBytes(summary.logical_bytes)}.
+          </div>
+        )}
       </section>
 
       <div className="stats-grid">
@@ -82,7 +74,7 @@ export default function Stats({ result }: StatsProps) {
               </thead>
               <tbody>
                 {stats.by_extension.map((e) => {
-                  const pct = (e.size / totalShown) * 100;
+                  const pct = (e.size / total) * 100;
                   return (
                     <tr key={e.ext}>
                       <td>
@@ -91,15 +83,33 @@ export default function Stats({ result }: StatsProps) {
                           style={{ background: colorForExt(e.ext) }}
                         />
                       </td>
-                      <td className="mono">
-                        {e.ext ? `.${e.ext}` : "(none)"}
-                      </td>
+                      <td className="mono">{e.ext ? `.${e.ext}` : "(none)"}</td>
                       <td className="num">{formatNumber(e.count)}</td>
                       <td className="num">{formatBytes(e.size)}</td>
                       <td className="num">{pct.toFixed(2)}%</td>
                     </tr>
                   );
                 })}
+                {stats.ext_other && (
+                  <tr key="«other»" className="ext-other-row">
+                    <td>
+                      <span
+                        className="cat-bar-swatch"
+                        style={{ background: "var(--fg-3)" }}
+                      />
+                    </td>
+                    <td>
+                      {formatNumber(stats.ext_other.distinct)} more extensions
+                    </td>
+                    <td className="num">
+                      {formatNumber(stats.ext_other.count)}
+                    </td>
+                    <td className="num">{formatBytes(stats.ext_other.size)}</td>
+                    <td className="num">
+                      {((stats.ext_other.size / total) * 100).toFixed(2)}%
+                    </td>
+                  </tr>
+                )}
               </tbody>
             </table>
           </div>
@@ -123,7 +133,8 @@ export default function Stats({ result }: StatsProps) {
                       <span
                         className="cat-bar-swatch"
                         style={{
-                          background: colorForExt(extOf(f.name)),
+                          background:
+                            CATEGORIES[categorize(f.name)].color,
                         }}
                       />
                     </td>
@@ -141,10 +152,4 @@ export default function Stats({ result }: StatsProps) {
       </div>
     </div>
   );
-}
-
-function extOf(name: string): string {
-  const i = name.lastIndexOf(".");
-  if (i <= 0 || i === name.length - 1) return "";
-  return name.slice(i + 1).toLowerCase();
 }

@@ -19,16 +19,16 @@ tokio = { version = "1", features = ["macros", "time", "rt"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 jwalk = "0.8"
-rayon = "1.10"
 dashmap = "6.1"
 parking_lot = "0.12"
-thiserror = "1.0"
 
+# NOTE: no `panic = "abort"` here. The scan runs on a blocking thread wrapped
+# in catch_unwind (lib.rs); with abort, any panic in the scanner would kill
+# the whole app instead of surfacing as a recoverable error.
 [profile.release]
 opt-level = 3
 lto = "thin"
 codegen-units = 1
-panic = "abort"
 strip = true
 incremental = false
 

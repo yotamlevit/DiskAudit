@@ -1,60 +1,79 @@
 // READ-ONLY filesystem scanner. See SECURITY INVARIANT in lib.rs.
 //
-// Strategy:
-//   * jwalk does parallel directory traversal with a Rayon pool.
-//   * Symlinks are NOT followed (no loops, no escape from root).
-//   * Permission errors are counted, never panicked.
-//   * After traversal we build the full hierarchy, then PRUNE it for the
-//     frontend. Pruning aggregates small files into a synthetic rollup
-//     node per directory while preserving total bytes.
-//   * The full per-directory file list is retained separately so the
-//     frontend can drill into a rollup ("expand_aggregate") on demand
-//     without rescanning.
+// Architecture:
+//   * jwalk walks the tree in parallel (Rayon pool), accumulating per-directory
+//     records into a DashMap that lives for the whole session (ScanShared).
+//   * The map IS the data store. Views, listings, stats and search are served
+//     on demand from it — no giant tree payload is ever shipped to the UI.
+//     While a scan is running the same queries work against the partial map,
+//     which is what makes the streaming treemap possible.
+//   * After the walk, `finalize` caches recursive totals on every directory,
+//     making later view queries O(view size).
 //
-// IMPORTANT: every byte that sits on disk is counted. iCloud placeholder
-// stubs, hidden dotfiles, and aggregated small files all contribute to
-// totals — we never silently discard size.
+// Size accounting (deliberate policy — see README):
+//   * `size` is ALLOCATED bytes (st_blocks * 512): what deleting the file
+//     would actually free. Sparse files count their real blocks, not their
+//     logical length. The logical total is tracked separately for the summary.
+//   * Hardlinks are deduplicated by (device, inode): the first path seen
+//     carries the size, other links show 0 bytes. The deduplicated amount is
+//     reported in the summary. (Which path "wins" depends on walk order.)
+//   * APFS clones are NOT deduplicated — macOS offers no public API to detect
+//     shared extents; Finder counts clones the same way.
+//   * Symlinks are never followed. Each one is recorded where it stands with
+//     the link's own allocated size (usually 0) and tallied in the summary.
+//   * Skipped territory (cloud dirs, other volumes, the firmlink alias) is
+//     recorded as zero-size nodes with an explicit reason, never dropped.
+//
+// Error accounting: every failure is counted exactly once —
+//   * unreadable directory (read_dir fails): counted via jwalk's
+//     read_children_error in the drain loop, attributed to that directory;
+//   * unreadable entry inside a readable directory: counted in
+//     process_read_dir where it surfaces as an Err child;
+//   * stat failure on a file: counted where the metadata call fails.
 
-use dashmap::DashMap;
-use jwalk::WalkDirGeneric;
+use crate::categories::category_for_ext;
+use crate::platform::{ScanPolicy, SkipReason};
+use dashmap::{DashMap, DashSet};
 use parking_lot::Mutex;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use thiserror::Error;
 
-// ----- Pruning constants ---------------------------------------------------
+// ----- Tunables ------------------------------------------------------------
 
-const MAX_FILES_PER_DIR: usize = 200;
-const MIN_FILE_SIZE_FRACTION: f64 = 0.001;
-const MIN_FILE_SIZE_ABS: u64 = 64 * 1024;
-const MAX_TOTAL_NODES: usize = 15_000;
+/// How often the parallel walk checks the cancel flag inside one directory.
 const CANCEL_CHECK_STRIDE: usize = 256;
+/// Progress emit throttle (ms).
+const PROGRESS_EMIT_MS: u64 = 100;
 
-// ----- Errors --------------------------------------------------------------
+/// View building: always keep at least this many children per directory
+/// (so small dirs render fully) …
+const KEEP_MIN: usize = 10;
+/// … but never more than this many.
+const MAX_CHILDREN_PER_DIR: usize = 300;
+/// Children smaller than this fraction of their parent are rolled into the
+/// tail aggregate — they'd be sub-pixel slivers at that zoom level.
+const FLOOR_FRACTION: f64 = 0.002;
+const FLOOR_ABS: u64 = 1024;
 
-#[derive(Debug, Error)]
-pub enum ScanError {
-    #[error("scan cancelled")]
-    Cancelled,
-}
+const TOP_FILES_N: usize = 100;
+const MAX_EXT_ROWS: usize = 80;
+const MAX_SKIPPED_REPORTED: usize = 500;
 
 // ----- Cancellation --------------------------------------------------------
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct ScanCancelToken {
     flag: Arc<AtomicBool>,
 }
 
 impl ScanCancelToken {
     pub fn new() -> Self {
-        Self {
-            flag: Arc::new(AtomicBool::new(false)),
-        }
+        Self::default()
     }
     pub fn cancel(&self) {
         self.flag.store(true, Ordering::SeqCst);
@@ -64,67 +83,209 @@ impl ScanCancelToken {
     }
 }
 
-// ----- Progress ------------------------------------------------------------
+// ----- Accumulator store ---------------------------------------------------
 
-type ProgressCb = dyn Fn(u64, u64, u64, u64, String) + Send + Sync;
-
-pub struct ScanProgress {
-    pub files: Arc<AtomicU64>,
-    pub dirs: Arc<AtomicU64>,
-    pub bytes: Arc<AtomicU64>,
-    pub errors: Arc<AtomicU64>,
-    pub last_emit_ms: Arc<AtomicU64>,
-    pub on_tick: Arc<ProgressCb>,
-}
-
-// ----- Tree node (frontend payload) ----------------------------------------
-
-#[derive(Serialize, Clone, Debug)]
-pub struct TreeNode {
+#[derive(Clone, Debug)]
+pub struct FileRec {
     pub name: String,
-    pub path: String,
+    /// Allocated bytes (0 for hardlink duplicates and unstattable files).
     pub size: u64,
-    pub is_dir: bool,
-    pub file_count: u64,
-    pub dir_count: u64,
-    pub error_count: u64,
-    /// Synthetic rollup of files pruned from the visualization. Click to
-    /// expand_aggregate() the parent directory and see the underlying list.
-    #[serde(skip_serializing_if = "is_false", default)]
-    pub aggregated: bool,
-    pub aggregated_count: u64,
-    /// For aggregated nodes: the parent directory path whose small files
-    /// are represented here. Used by expand_aggregate.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub aggregated_parent: Option<String>,
-    /// True if this directory was skipped because it lives on a different
-    /// filesystem (cloud sync, USB, network mount). Its `size` is unknown
-    /// from our side — the bytes are not on this disk.
-    #[serde(skip_serializing_if = "is_false", default)]
-    pub external: bool,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub children: Vec<TreeNode>,
+    pub is_symlink: bool,
 }
+
+/// Per-directory record. Built up during the walk; recursive totals are
+/// filled in by `finalize` (and computed on the fly for live views).
+#[derive(Default)]
+pub struct DirAcc {
+    pub name: String,
+    /// Allocated bytes of direct (non-recursive) entries.
+    pub own_size: u64,
+    pub files: Vec<FileRec>,
+    pub children: Vec<PathBuf>,
+    pub error_count: u64,
+    pub symlink_count: u64,
+    pub skip: Option<SkipReason>,
+    // Cached recursive totals, valid once ScanShared.complete is set.
+    pub total_size: u64,
+    pub rec_files: u64,
+    pub rec_dirs: u64,
+    pub rec_errors: u64,
+    pub rec_symlinks: u64,
+}
+
+impl DirAcc {
+    fn new(name: String) -> Self {
+        Self {
+            name,
+            ..Default::default()
+        }
+    }
+    fn skipped(name: String, reason: SkipReason) -> Self {
+        Self {
+            name,
+            skip: Some(reason),
+            ..Default::default()
+        }
+    }
+}
+
+/// Live progress counters (UI ticker only; authoritative numbers come from
+/// the finalized tree).
+#[derive(Default)]
+pub struct Counters {
+    pub files: AtomicU64,
+    pub dirs: AtomicU64,
+    pub bytes: AtomicU64,
+    pub logical_bytes: AtomicU64,
+    pub symlinks: AtomicU64,
+    pub hardlink_saved: AtomicU64,
+    pub errors: AtomicU64,
+    last_emit_ms: AtomicU64,
+}
+
+/// One scan's entire state. Held in AppState for the whole session; queries
+/// (views, listings, stats, search) are served from it on demand, during and
+/// after the walk.
+pub struct ScanShared {
+    pub scan_id: u64,
+    pub root: PathBuf,
+    pub root_name: String,
+    pub dirs: DashMap<PathBuf, Mutex<DirAcc>>,
+    pub token: ScanCancelToken,
+    /// finalize() ran; cached totals are valid.
+    pub complete: AtomicBool,
+    /// The walk was cancelled; results are partial.
+    pub cancelled: AtomicBool,
+    pub counters: Counters,
+    pub summary: Mutex<Option<ScanDone>>,
+}
+
+impl ScanShared {
+    pub fn new(scan_id: u64, root: PathBuf) -> Self {
+        let root_name = root
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| root.to_string_lossy().to_string());
+        Self {
+            scan_id,
+            root,
+            root_name,
+            dirs: DashMap::new(),
+            token: ScanCancelToken::new(),
+            complete: AtomicBool::new(false),
+            cancelled: AtomicBool::new(false),
+            counters: Counters::default(),
+            summary: Mutex::new(None),
+        }
+    }
+
+    pub fn is_complete(&self) -> bool {
+        self.complete.load(Ordering::Acquire)
+    }
+}
+
+// ----- Frontend payload types (mirrored by hand in src/types.ts) -----------
 
 fn is_false(b: &bool) -> bool {
     !*b
 }
+fn is_zero(n: &u64) -> bool {
+    *n == 0
+}
 
-pub struct ScanOutput {
-    pub root: TreeNode,
-    pub total_files: u64,
-    pub total_dirs: u64,
-    pub total_bytes: u64,
-    pub permission_errors: u64,
-    /// Full per-directory file list (name, size). Retained so the frontend
-    /// can drill into aggregated rollups without rescanning.
-    pub files_by_dir: HashMap<PathBuf, Vec<(String, u64)>>,
-    pub stats: Stats,
+/// One node of an on-demand treemap view.
+#[derive(Serialize, Clone, Debug, Default)]
+pub struct ViewNode {
+    pub name: String,
+    pub path: String,
+    /// Allocated bytes, recursive for directories.
+    pub size: u64,
+    pub is_dir: bool,
+    /// Recursive counts (directories only).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub file_count: u64,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub dir_count: u64,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub error_count: u64,
+    #[serde(skip_serializing_if = "is_false")]
+    pub is_symlink: bool,
+    /// Synthetic tail rollup of this directory's smaller children (files AND
+    /// folders). Click → list the parent directory.
+    #[serde(skip_serializing_if = "is_false")]
+    pub aggregated: bool,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub aggregated_count: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aggregated_parent: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skip_reason: Option<SkipReason>,
+    /// Directory has content that this view doesn't include (depth cap or
+    /// node budget). Drill in to fetch it.
+    #[serde(skip_serializing_if = "is_false")]
+    pub has_hidden_children: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<ViewNode>,
+}
+
+#[derive(Serialize, Clone, Debug)]
+pub struct ViewPayload {
+    pub scan_id: u64,
+    pub complete: bool,
+    pub cancelled: bool,
+    pub root: ViewNode,
+}
+
+#[derive(Serialize, Clone, Debug)]
+pub struct DirEntryPayload {
+    pub name: String,
+    pub path: String,
+    pub size: u64,
+    pub is_dir: bool,
+    #[serde(skip_serializing_if = "is_false")]
+    pub is_symlink: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skip_reason: Option<SkipReason>,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub file_count: u64,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub dir_count: u64,
+}
+
+#[derive(Serialize, Clone, Debug)]
+pub struct DirListing {
+    pub path: String,
+    pub dir_size: u64,
+    pub total: usize,
+    pub offset: usize,
+    pub entries: Vec<DirEntryPayload>,
+}
+
+#[derive(Serialize, Clone, Debug)]
+pub struct SearchHit {
+    pub name: String,
+    pub path: String,
+    pub size: u64,
+    pub is_dir: bool,
 }
 
 #[derive(Serialize, Clone, Debug, Default)]
 pub struct ExtStat {
     pub ext: String,
+    pub count: u64,
+    pub size: u64,
+}
+
+#[derive(Serialize, Clone, Debug, Default)]
+pub struct CatStat {
+    pub category: String,
+    pub count: u64,
+    pub size: u64,
+}
+
+#[derive(Serialize, Clone, Debug, Default)]
+pub struct ExtOtherStat {
+    pub distinct: u64,
     pub count: u64,
     pub size: u64,
 }
@@ -138,11 +299,48 @@ pub struct TopFile {
 
 #[derive(Serialize, Clone, Debug, Default)]
 pub struct Stats {
-    /// One entry per distinct extension. Sorted by size descending.
+    /// Complete category totals over ALL files (not truncated). Non-zero
+    /// categories only, sorted by size descending.
+    pub by_category: Vec<CatStat>,
+    /// Top extensions by size. `ext_other` holds the aggregated remainder so
+    /// percentages still sum to the true total.
     pub by_extension: Vec<ExtStat>,
-    /// Top N largest files, by size descending.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ext_other: Option<ExtOtherStat>,
     pub top_files: Vec<TopFile>,
 }
+
+#[derive(Serialize, Clone, Debug)]
+pub struct SkippedEntry {
+    pub path: String,
+    pub reason: SkipReason,
+}
+
+/// Final (or cancelled-partial) scan summary.
+#[derive(Serialize, Clone, Debug)]
+pub struct ScanDone {
+    pub scan_id: u64,
+    pub root_path: String,
+    pub root_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub root_note: Option<String>,
+    pub cancelled: bool,
+    pub elapsed_ms: u64,
+    pub total_files: u64,
+    pub total_dirs: u64,
+    pub total_symlinks: u64,
+    /// Allocated bytes (hardlink-deduplicated) — the headline number.
+    pub allocated_bytes: u64,
+    /// Sum of logical file lengths, for the summary's honesty line.
+    pub logical_bytes: u64,
+    pub hardlink_saved_bytes: u64,
+    pub permission_errors: u64,
+    pub skipped: Vec<SkippedEntry>,
+    pub skipped_total: u64,
+    pub stats: Stats,
+}
+
+// ----- Walk ----------------------------------------------------------------
 
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -151,275 +349,313 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-// Internal accumulator for a directory while we walk.
-struct DirAcc {
-    name: String,
-    own_size: u64,
-    file_count: u64,
-    dir_count: u64,
-    error_count: u64,
-    external: bool,
-    files: Vec<(String, u64)>,
-    children: Vec<PathBuf>,
-}
-
-/// Path-based skip list for known macOS cloud-sync mount points. These
-/// FileProvider-backed directories sit on the same device as $HOME but
-/// every metadata() call inside them can hang on network I/O.
-/// Their bytes are NOT on the local disk.
-fn is_cloud_sync_path(path: &Path) -> bool {
-    let s = path.to_string_lossy();
-    s.contains("/Library/CloudStorage/")
-        || s.contains("/Library/Mobile Documents/")
-        // Common direct-mount locations:
-        || s.ends_with("/Library/CloudStorage")
-        || s.ends_with("/Library/Mobile Documents")
-}
-
-pub fn scan(
-    root: &Path,
-    progress: ScanProgress,
-    cancel: ScanCancelToken,
-) -> Result<ScanOutput, ScanError> {
-    let canonical_root = root
-        .canonicalize()
-        .unwrap_or_else(|_| root.to_path_buf());
-
-    let dirs: Arc<DashMap<PathBuf, Mutex<DirAcc>>> = Arc::new(DashMap::new());
-
-    let cancel_for_walk = cancel.clone();
-    let dirs_for_walk = dirs.clone();
-    let progress_files = progress.files.clone();
-    let progress_dirs = progress.dirs.clone();
-    let progress_bytes = progress.bytes.clone();
-    let progress_errors = progress.errors.clone();
-    let progress_last = progress.last_emit_ms.clone();
-    let progress_cb = progress.on_tick.clone();
-
-    let root_name = canonical_root
-        .file_name()
+fn name_of(path: &Path) -> String {
+    path.file_name()
         .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| canonical_root.to_string_lossy().to_string());
-    dirs.insert(
-        canonical_root.clone(),
-        Mutex::new(DirAcc {
-            name: root_name,
-            own_size: 0,
-            file_count: 0,
-            dir_count: 0,
-            error_count: 0,
-            external: false,
-            files: Vec::new(),
-            children: Vec::new(),
-        }),
-    );
+        .unwrap_or_else(|| path.to_string_lossy().to_string())
+}
 
-    // Record the root's filesystem device so we can detect crossings into
-    // mounts (USB drives, network shares, real FUSE volumes).
-    let root_dev: u64 = std::fs::metadata(&canonical_root)
-        .map(|m| m.dev())
-        .unwrap_or(0);
+pub type ProgressCb = dyn Fn(u64, u64, u64, u64, String) + Send + Sync;
 
-    let walker = WalkDirGeneric::<((), ())>::new(&canonical_root)
+/// Walk the tree rooted at `shared.root`, populating `shared.dirs`.
+/// Returns normally on completion OR cancellation (check `shared.cancelled`).
+/// Panic-free by construction: no unwrap/expect/indexing on runtime data.
+pub fn walk(shared: &Arc<ScanShared>, policy: Arc<ScanPolicy>, on_progress: Arc<ProgressCb>) {
+    let root = shared.root.clone();
+    shared
+        .dirs
+        .entry(root.clone())
+        .or_insert_with(|| Mutex::new(DirAcc::new(shared.root_name.clone())));
+
+    // (device, inode) pairs already counted, for hardlink dedup.
+    let seen_inodes: Arc<DashSet<(u64, u64)>> = Arc::new(DashSet::new());
+
+    let shared_w = shared.clone();
+    let policy_w = policy;
+    let seen_w = seen_inodes;
+    let progress_w = on_progress.clone();
+
+    let walker = jwalk::WalkDirGeneric::<((), ())>::new(&root)
         .skip_hidden(false)
         .follow_links(false)
         .parallelism(jwalk::Parallelism::RayonNewPool(0))
-        .process_read_dir(move |_depth, dir_path, _read_dir_state, children| {
-            // Fast cancel path: drop all entries so jwalk doesn't queue more.
-            if cancel_for_walk.is_cancelled() {
+        .process_read_dir(move |_depth, dir_path, _state, children| {
+            if shared_w.token.is_cancelled() {
                 children.clear();
                 return;
             }
 
             let dir_path_buf = dir_path.to_path_buf();
-            if !dirs_for_walk.contains_key(&dir_path_buf) {
-                let name = dir_path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_else(|| dir_path.to_string_lossy().to_string());
-                dirs_for_walk.insert(
-                    dir_path_buf.clone(),
-                    Mutex::new(DirAcc {
-                        name,
-                        own_size: 0,
-                        file_count: 0,
-                        dir_count: 0,
-                        error_count: 0,
-                        external: false,
-                        files: Vec::new(),
-                        children: Vec::new(),
-                    }),
-                );
-            }
+            shared_w
+                .dirs
+                .entry(dir_path_buf.clone())
+                .or_insert_with(|| Mutex::new(DirAcc::new(name_of(dir_path))));
 
-            // External-filesystem skip. Two checks, either trips the skip:
-            //   (a) Path-based: known macOS cloud-sync mount points
-            //       (FileProvider sits on the same device but every stat()
-            //       inside it can hang on the network).
-            //   (b) Dev-ID-based: real mounts (USB, network, FUSE volumes)
-            //       that report a different device id than the scan root.
-            // Skipped dirs are recorded in the tree as zero-size externals;
-            // their bytes are not counted toward the local-disk total.
-            if is_cloud_sync_path(dir_path) {
-                children.clear();
-                if let Some(acc) = dirs_for_walk.get(&dir_path_buf) {
-                    acc.lock().external = true;
-                }
-                return;
-            }
-            if root_dev != 0 {
-                if let Ok(md) = std::fs::metadata(dir_path) {
-                    if md.dev() != root_dev {
-                        children.clear();
-                        if let Some(acc) = dirs_for_walk.get(&dir_path_buf) {
-                            acc.lock().external = true;
-                        }
-                        return;
-                    }
-                }
-            }
-
-            // Aggregate locally to minimize lock acquisition + atomic churn.
             let mut local_size: u64 = 0;
-            let mut local_files: Vec<(String, u64)> = Vec::new();
+            let mut local_logical: u64 = 0;
+            let mut local_files: Vec<FileRec> = Vec::new();
             let mut local_subdirs: Vec<PathBuf> = Vec::new();
             let mut local_errors: u64 = 0;
-            let mut iter_count: usize = 0;
+            let mut local_symlinks: u64 = 0;
+            let mut local_hl_saved: u64 = 0;
 
-            for entry_result in children.iter_mut() {
-                iter_count += 1;
-                if iter_count % CANCEL_CHECK_STRIDE == 0
-                    && cancel_for_walk.is_cancelled()
+            for (i, entry_result) in children.iter_mut().enumerate() {
+                if i % CANCEL_CHECK_STRIDE == CANCEL_CHECK_STRIDE - 1
+                    && shared_w.token.is_cancelled()
                 {
                     children.clear();
                     return;
                 }
-
                 match entry_result {
                     Ok(entry) => {
-                        if entry.file_type.is_symlink() {
-                            continue;
-                        }
-                        let fname_os = entry.file_name();
-                        let fname = fname_os.to_string_lossy();
-
-                        if entry.file_type.is_file() {
-                            // Count every file. iCloud placeholders, hidden
-                            // dotfiles, and everything else are ALL bytes
-                            // on disk — they contribute to totals.
-                            let size = match entry.metadata() {
-                                Ok(md) => md.len(),
-                                Err(_) => {
-                                    local_errors += 1;
-                                    0
-                                }
-                            };
+                        let fname = entry.file_name().to_string_lossy().into_owned();
+                        let ft = entry.file_type;
+                        if ft.is_symlink() {
+                            // Never followed; the link itself occupies ~0
+                            // allocated bytes but is still recorded.
+                            let size = entry
+                                .metadata()
+                                .ok()
+                                .map(|md| md.blocks() * 512)
+                                .unwrap_or(0);
+                            local_symlinks += 1;
                             local_size += size;
-                            local_files.push((fname.into_owned(), size));
-                        } else if entry.file_type.is_dir() {
+                            local_files.push(FileRec {
+                                name: fname,
+                                size,
+                                is_symlink: true,
+                            });
+                        } else if ft.is_dir() {
                             let child_path = entry.path();
-                            let child_name = fname.into_owned();
-                            dirs_for_walk
+                            let dev = entry.metadata().ok().map(|md| md.dev());
+                            let skip = policy_w.skip_reason(&child_path, dev);
+                            shared_w
+                                .dirs
                                 .entry(child_path.clone())
                                 .or_insert_with(|| {
-                                    Mutex::new(DirAcc {
-                                        name: child_name,
-                                        own_size: 0,
-                                        file_count: 0,
-                                        dir_count: 0,
-                                        error_count: 0,
-                                        external: false,
-                                        files: Vec::new(),
-                                        children: Vec::new(),
+                                    Mutex::new(match skip {
+                                        Some(r) => DirAcc::skipped(fname.clone(), r),
+                                        None => DirAcc::new(fname.clone()),
                                     })
                                 });
+                            if skip.is_some() {
+                                // Do not descend.
+                                entry.read_children_path = None;
+                            }
                             local_subdirs.push(child_path);
+                        } else {
+                            // Regular files, plus rare others (sockets,
+                            // FIFOs) which report 0 blocks anyway.
+                            match entry.metadata() {
+                                Ok(md) => {
+                                    let alloc = md.blocks() * 512;
+                                    let counted = if md.nlink() > 1
+                                        && !seen_w.insert((md.dev(), md.ino()))
+                                    {
+                                        local_hl_saved += alloc;
+                                        0
+                                    } else {
+                                        alloc
+                                    };
+                                    local_size += counted;
+                                    local_logical += md.len();
+                                    local_files.push(FileRec {
+                                        name: fname,
+                                        size: counted,
+                                        is_symlink: false,
+                                    });
+                                }
+                                Err(_) => {
+                                    local_errors += 1;
+                                    local_files.push(FileRec {
+                                        name: fname,
+                                        size: 0,
+                                        is_symlink: false,
+                                    });
+                                }
+                            }
                         }
                     }
                     Err(_) => {
+                        // Unreadable entry inside a readable directory.
+                        // Counted here and ONLY here (the drain loop skips
+                        // Err entries to avoid double counting).
                         local_errors += 1;
                     }
                 }
             }
 
-            let added_files = local_files.len() as u64;
+            let added_files = local_files.iter().filter(|f| !f.is_symlink).count() as u64;
             let added_dirs = local_subdirs.len() as u64;
 
-            if let Some(acc) = dirs_for_walk.get(&dir_path_buf) {
+            if let Some(acc) = shared_w.dirs.get(&dir_path_buf) {
                 let mut g = acc.lock();
                 g.own_size += local_size;
-                g.file_count += added_files;
-                g.dir_count += added_dirs;
                 g.error_count += local_errors;
+                g.symlink_count += local_symlinks;
                 g.files.append(&mut local_files);
                 g.children.append(&mut local_subdirs);
             }
-            progress_files.fetch_add(added_files, Ordering::Relaxed);
-            progress_dirs.fetch_add(added_dirs, Ordering::Relaxed);
-            progress_bytes.fetch_add(local_size, Ordering::Relaxed);
-            progress_errors.fetch_add(local_errors, Ordering::Relaxed);
 
-            // Throttled progress emit (~ every 100ms).
+            let c = &shared_w.counters;
+            c.files.fetch_add(added_files, Ordering::Relaxed);
+            c.dirs.fetch_add(added_dirs, Ordering::Relaxed);
+            c.bytes.fetch_add(local_size, Ordering::Relaxed);
+            c.logical_bytes.fetch_add(local_logical, Ordering::Relaxed);
+            c.symlinks.fetch_add(local_symlinks, Ordering::Relaxed);
+            c.hardlink_saved.fetch_add(local_hl_saved, Ordering::Relaxed);
+            c.errors.fetch_add(local_errors, Ordering::Relaxed);
+
             let now = now_ms();
-            let last = progress_last.load(Ordering::Relaxed);
-            if now.saturating_sub(last) >= 100
-                && progress_last
+            let last = c.last_emit_ms.load(Ordering::Relaxed);
+            if now.saturating_sub(last) >= PROGRESS_EMIT_MS
+                && c.last_emit_ms
                     .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
                     .is_ok()
             {
-                let f = progress_files.load(Ordering::Relaxed);
-                let d = progress_dirs.load(Ordering::Relaxed);
-                let b = progress_bytes.load(Ordering::Relaxed);
-                let e = progress_errors.load(Ordering::Relaxed);
-                let cur = dir_path.to_string_lossy().to_string();
-                (progress_cb)(f, d, b, e, cur);
+                (progress_w)(
+                    c.files.load(Ordering::Relaxed),
+                    c.dirs.load(Ordering::Relaxed),
+                    c.bytes.load(Ordering::Relaxed),
+                    c.errors.load(Ordering::Relaxed),
+                    dir_path.to_string_lossy().to_string(),
+                );
             }
         });
 
+    // Drain the walker. Unreadable DIRECTORIES surface here as an Ok entry
+    // carrying read_children_error — count each once, attributed to that
+    // directory. Err entries were already counted in process_read_dir.
     for entry in walker {
-        if cancel.is_cancelled() {
-            return Err(ScanError::Cancelled);
+        if shared.token.is_cancelled() {
+            shared.cancelled.store(true, Ordering::SeqCst);
+            break;
         }
-        if entry.is_err() {
-            progress.errors.fetch_add(1, Ordering::Relaxed);
+        if let Ok(e) = entry {
+            if e.read_children_error.is_some() {
+                if let Some(acc) = shared.dirs.get(&e.path()) {
+                    acc.lock().error_count += 1;
+                }
+                shared.counters.errors.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
-
-    {
-        let f = progress.files.load(Ordering::Relaxed);
-        let d = progress.dirs.load(Ordering::Relaxed);
-        let b = progress.bytes.load(Ordering::Relaxed);
-        let e = progress.errors.load(Ordering::Relaxed);
-        (progress.on_tick)(f, d, b, e, String::new());
+    if shared.token.is_cancelled() {
+        shared.cancelled.store(true, Ordering::SeqCst);
     }
 
-    // Snapshot the full per-dir file lists BEFORE pruning, so we can serve
-    // expand_aggregate later. This is the source of truth for drill-in.
-    let files_by_dir = snapshot_files_by_dir(&dirs);
-
-    // Compute stats from the same source. This walks every file once.
-    let stats = compute_stats(&dirs);
-
-    let mut tree = build_tree(&canonical_root, &dirs);
-    let total_bytes = tree.size;
-    prune_to_budget(&mut tree, total_bytes);
-
-    let total_files = progress.files.load(Ordering::Relaxed);
-    let total_dirs = progress.dirs.load(Ordering::Relaxed);
-    let permission_errors = progress.errors.load(Ordering::Relaxed);
-
-    Ok(ScanOutput {
-        root: tree,
-        total_files,
-        total_dirs,
-        total_bytes,
-        permission_errors,
-        files_by_dir,
-        stats,
-    })
+    // Final progress tick so the UI shows the true end state.
+    let c = &shared.counters;
+    (on_progress)(
+        c.files.load(Ordering::Relaxed),
+        c.dirs.load(Ordering::Relaxed),
+        c.bytes.load(Ordering::Relaxed),
+        c.errors.load(Ordering::Relaxed),
+        String::new(),
+    );
 }
 
-/// Lowercase the file's last extension, or "" if none.
+// ----- Totals / finalize ---------------------------------------------------
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Totals {
+    pub size: u64,
+    pub files: u64,
+    pub dirs: u64,
+    pub errors: u64,
+    pub symlinks: u64,
+}
+
+/// Compute recursive totals for every directory under `start` (iterative
+/// post-order; a visited-set guards against pathological cycles).
+fn compute_subtree_totals(shared: &ScanShared, start: &Path) -> HashMap<PathBuf, Totals> {
+    let mut memo: HashMap<PathBuf, Totals> = HashMap::new();
+    let mut visited: HashSet<PathBuf> = HashSet::new();
+    let mut stack: Vec<(PathBuf, bool)> = vec![(start.to_path_buf(), false)];
+
+    while let Some((path, processed)) = stack.pop() {
+        if processed {
+            let mut t = Totals::default();
+            let children = if let Some(acc) = shared.dirs.get(&path) {
+                let g = acc.lock();
+                t.size = g.own_size;
+                t.errors = g.error_count;
+                t.symlinks = g.symlink_count;
+                t.files = g.files.iter().filter(|f| !f.is_symlink).count() as u64;
+                g.children.clone()
+            } else {
+                Vec::new()
+            };
+            for child in &children {
+                if let Some(ct) = memo.get(child) {
+                    t.size += ct.size;
+                    t.files += ct.files;
+                    t.dirs += 1 + ct.dirs;
+                    t.errors += ct.errors;
+                    t.symlinks += ct.symlinks;
+                } else {
+                    t.dirs += 1;
+                }
+            }
+            memo.insert(path, t);
+        } else {
+            if !visited.insert(path.clone()) {
+                continue;
+            }
+            let children = shared
+                .dirs
+                .get(&path)
+                .map(|acc| acc.lock().children.clone())
+                .unwrap_or_default();
+            stack.push((path, true));
+            for child in children {
+                stack.push((child, false));
+            }
+        }
+    }
+    memo
+}
+
+/// Cache recursive totals on every DirAcc and mark the scan complete.
+pub fn finalize(shared: &ScanShared) {
+    let totals = compute_subtree_totals(shared, &shared.root);
+    for (path, t) in &totals {
+        if let Some(acc) = shared.dirs.get(path) {
+            let mut g = acc.lock();
+            g.total_size = t.size;
+            g.rec_files = t.files;
+            g.rec_dirs = t.dirs;
+            g.rec_errors = t.errors;
+            g.rec_symlinks = t.symlinks;
+        }
+    }
+    shared.complete.store(true, Ordering::Release);
+}
+
+/// Cached totals of the scan root (valid once finalize ran).
+pub fn root_totals(shared: &ScanShared) -> Totals {
+    cached_totals(shared, &shared.root)
+}
+
+fn cached_totals(shared: &ScanShared, path: &Path) -> Totals {
+    shared
+        .dirs
+        .get(path)
+        .map(|acc| {
+            let g = acc.lock();
+            Totals {
+                size: g.total_size,
+                files: g.rec_files,
+                dirs: g.rec_dirs,
+                errors: g.rec_errors,
+                symlinks: g.rec_symlinks,
+            }
+        })
+        .unwrap_or_default()
+}
+
+// ----- Stats ---------------------------------------------------------------
+
 fn extract_ext(name: &str) -> String {
     Path::new(name)
         .extension()
@@ -428,332 +664,559 @@ fn extract_ext(name: &str) -> String {
         .unwrap_or_default()
 }
 
-const TOP_FILES_N: usize = 50;
-const MAX_EXT_ROWS: usize = 80;
-
-fn compute_stats(dirs: &DashMap<PathBuf, Mutex<DirAcc>>) -> Stats {
+/// Full-scan statistics: complete per-category totals, top extensions with an
+/// aggregated remainder, and the largest files. Symlinks are excluded (they
+/// carry no meaningful size and would pollute the "no extension" bucket).
+pub fn compute_stats(shared: &ScanShared) -> Stats {
     use std::cmp::Reverse;
     use std::collections::BinaryHeap;
 
     let mut by_ext: HashMap<String, (u64, u64)> = HashMap::new();
-    // Min-heap of size N: keep largest TOP_FILES_N files. We push Reverse so
-    // smallest-of-the-top is at peek; if a new file beats it, swap.
+    let mut by_cat: HashMap<&'static str, (u64, u64)> = HashMap::new();
     let mut top: BinaryHeap<Reverse<(u64, String, String)>> = BinaryHeap::new();
 
-    for kv in dirs.iter() {
+    for kv in shared.dirs.iter() {
         let dir_path = kv.key();
         let g = kv.value().lock();
-        if g.external {
+        if g.skip.is_some() {
             continue;
         }
-        for (fname, fsize) in &g.files {
-            let ext = extract_ext(fname);
-            let entry = by_ext.entry(ext).or_insert((0, 0));
-            entry.0 += 1;
-            entry.1 += *fsize;
+        for f in &g.files {
+            if f.is_symlink {
+                continue;
+            }
+            let ext = extract_ext(&f.name);
+            let cat = category_for_ext(&ext);
+            let e = by_ext.entry(ext).or_insert((0, 0));
+            e.0 += 1;
+            e.1 += f.size;
+            let ce = by_cat.entry(cat).or_insert((0, 0));
+            ce.0 += 1;
+            ce.1 += f.size;
 
-            if top.len() < TOP_FILES_N {
-                let mut full = dir_path.clone();
-                full.push(fname);
+            let candidate = |top: &BinaryHeap<Reverse<(u64, String, String)>>| {
+                top.len() < TOP_FILES_N
+                    || top
+                        .peek()
+                        .map(|Reverse((min, _, _))| f.size > *min)
+                        .unwrap_or(true)
+            };
+            if candidate(&top) {
+                let full = dir_path.join(&f.name);
                 top.push(Reverse((
-                    *fsize,
-                    fname.clone(),
+                    f.size,
+                    f.name.clone(),
                     full.to_string_lossy().into_owned(),
                 )));
-            } else if let Some(Reverse((min_sz, _, _))) = top.peek() {
-                if fsize > min_sz {
+                if top.len() > TOP_FILES_N {
                     top.pop();
-                    let mut full = dir_path.clone();
-                    full.push(fname);
-                    top.push(Reverse((
-                        *fsize,
-                        fname.clone(),
-                        full.to_string_lossy().into_owned(),
-                    )));
                 }
             }
         }
     }
 
+    let mut by_category: Vec<CatStat> = by_cat
+        .into_iter()
+        .map(|(category, (count, size))| CatStat {
+            category: category.to_string(),
+            count,
+            size,
+        })
+        .collect();
+    by_category.sort_by_key(|c| std::cmp::Reverse(c.size));
+
     let mut by_extension: Vec<ExtStat> = by_ext
         .into_iter()
         .map(|(ext, (count, size))| ExtStat { ext, count, size })
         .collect();
-    by_extension.sort_by(|a, b| b.size.cmp(&a.size));
-    by_extension.truncate(MAX_EXT_ROWS);
+    by_extension.sort_by(|a, b| b.size.cmp(&a.size).then_with(|| a.ext.cmp(&b.ext)));
+    let ext_other = if by_extension.len() > MAX_EXT_ROWS {
+        let rest = by_extension.split_off(MAX_EXT_ROWS);
+        Some(ExtOtherStat {
+            distinct: rest.len() as u64,
+            count: rest.iter().map(|e| e.count).sum(),
+            size: rest.iter().map(|e| e.size).sum(),
+        })
+    } else {
+        None
+    };
 
-    let mut top_vec: Vec<TopFile> = top
+    let mut top_files: Vec<TopFile> = top
         .into_iter()
         .map(|Reverse((size, name, path))| TopFile { name, path, size })
         .collect();
-    top_vec.sort_by(|a, b| b.size.cmp(&a.size));
+    top_files.sort_by_key(|f| std::cmp::Reverse(f.size));
 
     Stats {
+        by_category,
         by_extension,
-        top_files: top_vec,
+        ext_other,
+        top_files,
     }
 }
 
-fn snapshot_files_by_dir(
-    dirs: &DashMap<PathBuf, Mutex<DirAcc>>,
-) -> HashMap<PathBuf, Vec<(String, u64)>> {
-    let mut out = HashMap::with_capacity(dirs.len());
-    for kv in dirs.iter() {
-        let g = kv.value().lock();
-        if !g.files.is_empty() {
-            out.insert(kv.key().clone(), g.files.clone());
+/// All skipped directories, for the summary panel. Sorted by path; capped.
+pub fn collect_skipped(shared: &ScanShared) -> (Vec<SkippedEntry>, u64) {
+    let mut all: Vec<SkippedEntry> = shared
+        .dirs
+        .iter()
+        .filter_map(|kv| {
+            let g = kv.value().lock();
+            g.skip.map(|reason| SkippedEntry {
+                path: kv.key().to_string_lossy().to_string(),
+                reason,
+            })
+        })
+        .collect();
+    let total = all.len() as u64;
+    all.sort_by(|a, b| a.path.cmp(&b.path));
+    all.truncate(MAX_SKIPPED_REPORTED);
+    (all, total)
+}
+
+// ----- View building -------------------------------------------------------
+
+enum Candidate {
+    Dir {
+        path: PathBuf,
+        name: String,
+        totals: Totals,
+        skip: Option<SkipReason>,
+    },
+    File {
+        name: String,
+        size: u64,
+        is_symlink: bool,
+    },
+}
+
+impl Candidate {
+    fn size(&self) -> u64 {
+        match self {
+            Candidate::Dir { totals, .. } => totals.size,
+            Candidate::File { size, .. } => *size,
         }
     }
-    out
 }
 
-fn build_tree(root: &Path, dirs: &DashMap<PathBuf, Mutex<DirAcc>>) -> TreeNode {
-    fn visit(path: &Path, dirs: &DashMap<PathBuf, Mutex<DirAcc>>) -> TreeNode {
-        let (
-            name,
-            own_size,
-            file_count,
-            dir_count,
-            error_count,
-            external,
-            files,
-            children_paths,
-        ) = {
-            if let Some(acc) = dirs.get(path) {
+struct Slot {
+    node: ViewNode,
+    child_ids: Vec<usize>,
+}
+
+/// Build a bounded treemap view of the subtree at `path`: at most `max_depth`
+/// levels and (approximately) `budget` nodes. Every directory either shows
+/// ALL its children, rolls the tail into one explicit aggregate node (bytes
+/// preserved), or is marked `has_hidden_children` — sizes are always honest.
+/// Works on both live (mid-scan) and finalized state.
+pub fn build_view(
+    shared: &ScanShared,
+    path: &Path,
+    max_depth: usize,
+    budget: usize,
+) -> Result<ViewNode, String> {
+    if !shared.dirs.contains_key(path) {
+        return Err(format!(
+            "path is not part of this scan: {}",
+            path.to_string_lossy()
+        ));
+    }
+    let live_totals = if shared.is_complete() {
+        None
+    } else {
+        Some(compute_subtree_totals(shared, path))
+    };
+    let totals_of = |p: &Path| -> Totals {
+        match &live_totals {
+            Some(map) => map.get(p).copied().unwrap_or_default(),
+            None => cached_totals(shared, p),
+        }
+    };
+
+    let max_depth = max_depth.clamp(1, 8);
+    let budget = budget.clamp(100, 20_000);
+
+    let root_totals = totals_of(path);
+    let root_node = dir_view_node(shared, path, root_totals);
+
+    let mut arena: Vec<Slot> = vec![Slot {
+        node: root_node,
+        child_ids: Vec::new(),
+    }];
+    let mut queue: VecDeque<(usize, PathBuf, usize)> =
+        VecDeque::from([(0usize, path.to_path_buf(), 0usize)]);
+    let mut budget_left = budget.saturating_sub(1);
+
+    while let Some((id, dir_path, depth)) = queue.pop_front() {
+        let (files, subdir_paths) = match shared.dirs.get(&dir_path) {
+            Some(acc) => {
                 let g = acc.lock();
-                (
-                    g.name.clone(),
-                    g.own_size,
-                    g.file_count,
-                    g.dir_count,
-                    g.error_count,
-                    g.external,
-                    g.files.clone(),
-                    g.children.clone(),
-                )
-            } else {
-                (
-                    path.file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_else(|| path.to_string_lossy().to_string()),
-                    0,
-                    0,
-                    0,
-                    0,
-                    false,
-                    Vec::new(),
-                    Vec::new(),
-                )
+                (g.files.clone(), g.children.clone())
             }
+            None => continue,
         };
+        let has_content = !files.is_empty() || !subdir_paths.is_empty();
 
-        let mut total = own_size;
-        let mut child_nodes: Vec<TreeNode> =
-            Vec::with_capacity(children_paths.len() + files.len());
-
-        for child_path in children_paths {
-            let node = visit(&child_path, dirs);
-            total += node.size;
-            child_nodes.push(node);
+        if depth >= max_depth || budget_left == 0 {
+            if let Some(slot) = arena.get_mut(id) {
+                slot.node.has_hidden_children = has_content;
+            }
+            continue;
         }
 
-        for (fname, fsize) in files {
-            let mut fpath = path.to_path_buf();
-            fpath.push(&fname);
-            child_nodes.push(TreeNode {
-                name: fname,
-                path: fpath.to_string_lossy().to_string(),
-                size: fsize,
-                is_dir: false,
-                file_count: 0,
-                dir_count: 0,
-                error_count: 0,
-                aggregated: false,
-                aggregated_count: 1,
-                aggregated_parent: None,
-                external: false,
-                children: Vec::new(),
+        let mut cands: Vec<Candidate> = Vec::with_capacity(files.len() + subdir_paths.len());
+        for sp in subdir_paths {
+            let (name, skip) = shared
+                .dirs
+                .get(&sp)
+                .map(|acc| {
+                    let g = acc.lock();
+                    (g.name.clone(), g.skip)
+                })
+                .unwrap_or_else(|| (name_of(&sp), None));
+            let totals = totals_of(&sp);
+            cands.push(Candidate::Dir {
+                path: sp,
+                name,
+                totals,
+                skip,
             });
         }
+        for f in files {
+            cands.push(Candidate::File {
+                name: f.name,
+                size: f.size,
+                is_symlink: f.is_symlink,
+            });
+        }
+        cands.sort_by_key(|c| std::cmp::Reverse(c.size()));
 
-        child_nodes.sort_by(|a, b| b.size.cmp(&a.size));
+        let parent_total = arena.get(id).map(|s| s.node.size).unwrap_or(0).max(1);
+        let floor = ((parent_total as f64 * FLOOR_FRACTION) as u64).max(FLOOR_ABS);
 
-        TreeNode {
-            name: if external {
-                format!("{} «external»", name)
-            } else {
-                name
-            },
-            path: path.to_string_lossy().to_string(),
-            size: total,
-            is_dir: true,
-            file_count,
-            dir_count,
-            error_count,
-            aggregated: false,
-            aggregated_count: file_count,
-            aggregated_parent: None,
-            external,
-            children: child_nodes,
+        let mut agg_size: u64 = 0;
+        let mut agg_count: u64 = 0;
+        let mut kept_here: usize = 0;
+        let mut placed: u64 = 0;
+
+        for (i, cand) in cands.into_iter().enumerate() {
+            // Keep a child if it clears the sliver floor — or, so the tail
+            // aggregate stays a genuine tail, while the not-yet-placed
+            // remainder still holds more than ~20% of the directory's bytes
+            // (uniform directories would otherwise collapse into one giant
+            // "smaller items" block).
+            let remainder_large = parent_total.saturating_sub(placed) > parent_total / 5;
+            let keep = budget_left > 0
+                && kept_here < MAX_CHILDREN_PER_DIR
+                && (i < KEEP_MIN || cand.size() >= floor || remainder_large);
+            if !keep {
+                agg_size += cand.size();
+                agg_count += 1;
+                continue;
+            }
+            budget_left -= 1;
+            kept_here += 1;
+            placed += cand.size();
+            let child_id = arena.len();
+            match cand {
+                Candidate::Dir {
+                    path: dpath,
+                    name,
+                    totals,
+                    skip,
+                } => {
+                    let mut node = ViewNode {
+                        name,
+                        path: dpath.to_string_lossy().to_string(),
+                        size: totals.size,
+                        is_dir: true,
+                        file_count: totals.files,
+                        dir_count: totals.dirs,
+                        error_count: totals.errors,
+                        skip_reason: skip,
+                        ..Default::default()
+                    };
+                    if skip.is_some() {
+                        node.has_hidden_children = false;
+                    } else {
+                        queue.push_back((child_id, dpath, depth + 1));
+                    }
+                    arena.push(Slot {
+                        node,
+                        child_ids: Vec::new(),
+                    });
+                }
+                Candidate::File {
+                    name,
+                    size,
+                    is_symlink,
+                } => {
+                    let fpath = dir_path.join(&name);
+                    arena.push(Slot {
+                        node: ViewNode {
+                            name,
+                            path: fpath.to_string_lossy().to_string(),
+                            size,
+                            is_dir: false,
+                            is_symlink,
+                            ..Default::default()
+                        },
+                        child_ids: Vec::new(),
+                    });
+                }
+            }
+            if let Some(slot) = arena.get_mut(id) {
+                slot.child_ids.push(child_id);
+            }
+        }
+
+        if agg_count > 0 {
+            let parent_str = dir_path.to_string_lossy().to_string();
+            let agg_id = arena.len();
+            arena.push(Slot {
+                node: ViewNode {
+                    name: format!("{} smaller items", agg_count),
+                    path: format!("{}/\u{f8ff}aggregate", parent_str),
+                    size: agg_size,
+                    is_dir: false,
+                    aggregated: true,
+                    aggregated_count: agg_count,
+                    aggregated_parent: Some(parent_str),
+                    ..Default::default()
+                },
+                child_ids: Vec::new(),
+            });
+            if let Some(slot) = arena.get_mut(id) {
+                slot.child_ids.push(agg_id);
+            }
         }
     }
 
-    visit(root, dirs)
+    Ok(assemble(&mut arena, 0))
 }
 
-// ----- Pruning -------------------------------------------------------------
-
-fn count_nodes(n: &TreeNode) -> usize {
-    1 + n.children.iter().map(count_nodes).sum::<usize>()
+/// Move nodes out of the arena into their final tree shape. Recursion depth
+/// is bounded by the view depth (≤ 8).
+fn assemble(arena: &mut Vec<Slot>, id: usize) -> ViewNode {
+    let (mut node, child_ids) = match arena.get_mut(id) {
+        Some(slot) => (
+            std::mem::take(&mut slot.node),
+            std::mem::take(&mut slot.child_ids),
+        ),
+        None => return ViewNode::default(),
+    };
+    for cid in child_ids {
+        node.children.push(assemble(arena, cid));
+    }
+    node
 }
 
-fn prune_to_budget(root: &mut TreeNode, total_bytes: u64) {
-    let mut global_floor: u64 = ((total_bytes as f64) * 0.0001) as u64;
-    if global_floor < MIN_FILE_SIZE_ABS {
-        global_floor = MIN_FILE_SIZE_ABS;
-    }
-    for _ in 0..6 {
-        prune_tree(root, global_floor);
-        if count_nodes(root) <= MAX_TOTAL_NODES {
-            return;
-        }
-        global_floor = global_floor.saturating_mul(2);
+fn dir_view_node(shared: &ScanShared, path: &Path, totals: Totals) -> ViewNode {
+    let (name, skip) = shared
+        .dirs
+        .get(path)
+        .map(|acc| {
+            let g = acc.lock();
+            (g.name.clone(), g.skip)
+        })
+        .unwrap_or_else(|| (name_of(path), None));
+    ViewNode {
+        name,
+        path: path.to_string_lossy().to_string(),
+        size: totals.size,
+        is_dir: true,
+        file_count: totals.files,
+        dir_count: totals.dirs,
+        error_count: totals.errors,
+        skip_reason: skip,
+        ..Default::default()
     }
 }
 
-fn prune_tree(node: &mut TreeNode, global_floor: u64) {
-    for child in &mut node.children {
-        if child.is_dir {
-            prune_tree(child, global_floor);
-        }
-    }
+// ----- Directory listing ---------------------------------------------------
 
-    let mut subdirs: Vec<TreeNode> = Vec::new();
-    let mut files: Vec<TreeNode> = Vec::new();
-    for child in node.children.drain(..) {
-        if child.is_dir {
-            subdirs.push(child);
-        } else {
-            files.push(child);
+/// Complete, honest listing of one directory's direct children (dirs with
+/// recursive totals + files), sorted by size descending. This is what an
+/// aggregate node opens into.
+pub fn list_dir(
+    shared: &ScanShared,
+    path: &Path,
+    offset: usize,
+    limit: usize,
+) -> Result<DirListing, String> {
+    let (files, subdir_paths) = match shared.dirs.get(path) {
+        Some(acc) => {
+            let g = acc.lock();
+            (g.files.clone(), g.children.clone())
         }
-    }
-
-    let local_floor: u64 = {
-        let by_fraction = ((node.size.max(1) as f64) * MIN_FILE_SIZE_FRACTION) as u64;
-        by_fraction.max(MIN_FILE_SIZE_ABS).max(global_floor)
+        None => {
+            return Err(format!(
+                "path is not part of this scan: {}",
+                path.to_string_lossy()
+            ))
+        }
     };
 
-    files.sort_by(|a, b| b.size.cmp(&a.size));
-
-    let mut kept: Vec<TreeNode> = Vec::with_capacity(MAX_FILES_PER_DIR);
-    let mut agg_size: u64 = 0;
-    let mut agg_count: u64 = 0;
-
-    for f in files {
-        let small = f.size < local_floor;
-        let over_cap = kept.len() >= MAX_FILES_PER_DIR;
-        if !small && !over_cap {
-            kept.push(f);
-        } else {
-            agg_size += f.size;
-            agg_count += f.aggregated_count.max(1);
+    let live_totals = if shared.is_complete() {
+        None
+    } else {
+        Some(compute_subtree_totals(shared, path))
+    };
+    let totals_of = |p: &Path| -> Totals {
+        match &live_totals {
+            Some(map) => map.get(p).copied().unwrap_or_default(),
+            None => cached_totals(shared, p),
         }
-    }
+    };
 
-    if agg_count > 0 {
-        kept.push(TreeNode {
-            name: format!("« {} smaller files »", agg_count),
-            path: format!("{}/<small files>", node.path),
-            size: agg_size,
-            is_dir: false,
-            file_count: agg_count,
-            dir_count: 0,
-            error_count: 0,
-            aggregated: true,
-            aggregated_count: agg_count,
-            aggregated_parent: Some(node.path.clone()),
-            external: false,
-            children: Vec::new(),
+    let mut entries: Vec<DirEntryPayload> = Vec::with_capacity(files.len() + subdir_paths.len());
+    for sp in subdir_paths {
+        let (name, skip) = shared
+            .dirs
+            .get(&sp)
+            .map(|acc| {
+                let g = acc.lock();
+                (g.name.clone(), g.skip)
+            })
+            .unwrap_or_else(|| (name_of(&sp), None));
+        let t = totals_of(&sp);
+        entries.push(DirEntryPayload {
+            name,
+            path: sp.to_string_lossy().to_string(),
+            size: t.size,
+            is_dir: true,
+            is_symlink: false,
+            skip_reason: skip,
+            file_count: t.files,
+            dir_count: t.dirs,
         });
     }
-
-    let mut all = subdirs;
-    all.extend(kept);
-    all.sort_by(|a, b| b.size.cmp(&a.size));
-    node.children = all;
-}
-
-// ----- Aggregate expansion (for drill-in on rollup nodes) ------------------
-
-/// Build the list of files that were aggregated for a directory: i.e., the
-/// files smaller than that dir's local prune floor (or beyond MAX_FILES_PER_DIR).
-/// Returns a synthetic "directory" node containing those files as leaves so
-/// the frontend can render them as a sub-treemap.
-pub fn expand_aggregate(
-    parent_dir: &Path,
-    files: &[(String, u64)],
-    parent_total_size: u64,
-    global_floor: u64,
-) -> TreeNode {
-    let local_floor: u64 = {
-        let by_fraction = ((parent_total_size.max(1) as f64) * MIN_FILE_SIZE_FRACTION) as u64;
-        by_fraction.max(MIN_FILE_SIZE_ABS).max(global_floor)
-    };
-
-    let mut sorted: Vec<&(String, u64)> = files.iter().collect();
-    sorted.sort_by(|a, b| b.1.cmp(&a.1));
-
-    let small_files: Vec<&(String, u64)> = sorted
-        .iter()
-        .enumerate()
-        .filter(|(i, (_, sz))| *i >= MAX_FILES_PER_DIR || *sz < local_floor)
-        .map(|(_, p)| *p)
-        .collect();
-
-    let mut total: u64 = 0;
-    let mut children: Vec<TreeNode> = Vec::with_capacity(small_files.len());
-    for (fname, fsize) in &small_files {
-        total += *fsize;
-        let mut fpath = parent_dir.to_path_buf();
-        fpath.push(fname);
-        children.push(TreeNode {
-            name: fname.clone(),
+    for f in files {
+        let fpath = path.join(&f.name);
+        entries.push(DirEntryPayload {
+            name: f.name,
             path: fpath.to_string_lossy().to_string(),
-            size: *fsize,
+            size: f.size,
             is_dir: false,
+            is_symlink: f.is_symlink,
+            skip_reason: None,
             file_count: 0,
             dir_count: 0,
-            error_count: 0,
-            aggregated: false,
-            aggregated_count: 1,
-            aggregated_parent: None,
-            external: false,
-            children: Vec::new(),
         });
     }
-    children.sort_by(|a, b| b.size.cmp(&a.size));
+    entries.sort_by(|a, b| b.size.cmp(&a.size).then_with(|| a.name.cmp(&b.name)));
 
-    TreeNode {
-        name: format!("« {} smaller files »", children.len() as u64),
-        path: format!("{}/<small files>", parent_dir.to_string_lossy()),
-        size: total,
-        is_dir: true,
-        file_count: children.len() as u64,
-        dir_count: 0,
-        error_count: 0,
-        aggregated: true,
-        aggregated_count: children.len() as u64,
-        aggregated_parent: Some(parent_dir.to_string_lossy().to_string()),
-        external: false,
-        children,
+    let total = entries.len();
+    let dir_size = totals_of(path).size;
+    let limit = limit.clamp(1, 2000);
+    let end = offset.saturating_add(limit).min(total);
+    let slice = if offset < total {
+        entries[offset..end].to_vec()
+    } else {
+        Vec::new()
+    };
+
+    Ok(DirListing {
+        path: path.to_string_lossy().to_string(),
+        dir_size,
+        total,
+        offset,
+        entries: slice,
+    })
+}
+
+// ----- Search --------------------------------------------------------------
+
+pub struct SearchQuery {
+    pub text: String,
+    pub min_size: u64,
+    pub category: Option<String>,
+    pub limit: usize,
+}
+
+/// Case-insensitive substring search over every scanned file and directory
+/// name, ranked by size. Requires a finalized scan (totals must be cached).
+pub fn search(shared: &ScanShared, q: &SearchQuery) -> Vec<SearchHit> {
+    use std::cmp::Reverse;
+    use std::collections::BinaryHeap;
+
+    if !shared.is_complete() {
+        return Vec::new();
     }
+    let needle = q.text.to_lowercase();
+    let limit = q.limit.clamp(1, 1000);
+    // Min-heap of the top `limit` hits by size.
+    let mut heap: BinaryHeap<Reverse<(u64, String, String, bool)>> = BinaryHeap::new();
+    let mut push = |size: u64, name: &str, path: String, is_dir: bool| {
+        if size < q.min_size {
+            return;
+        }
+        if heap.len() >= limit {
+            if let Some(Reverse((min, _, _, _))) = heap.peek() {
+                if size <= *min {
+                    return;
+                }
+            }
+            heap.pop();
+        }
+        heap.push(Reverse((size, name.to_string(), path, is_dir)));
+    };
+
+    for kv in shared.dirs.iter() {
+        let dir_path = kv.key();
+        let g = kv.value().lock();
+        // Directory hits (only for pure text searches — a category filter
+        // means "files of this kind").
+        if q.category.is_none()
+            && !needle.is_empty()
+            && g.name.to_lowercase().contains(&needle)
+            && dir_path != &shared.root
+        {
+            push(
+                g.total_size,
+                &g.name,
+                dir_path.to_string_lossy().to_string(),
+                true,
+            );
+        }
+        if g.skip.is_some() {
+            continue;
+        }
+        for f in &g.files {
+            if f.is_symlink {
+                continue;
+            }
+            if !needle.is_empty() && !f.name.to_lowercase().contains(&needle) {
+                continue;
+            }
+            if let Some(cat) = &q.category {
+                if category_for_ext(&extract_ext(&f.name)) != cat.as_str() {
+                    continue;
+                }
+            }
+            let fpath = dir_path.join(&f.name);
+            push(
+                f.size,
+                &f.name,
+                fpath.to_string_lossy().to_string(),
+                false,
+            );
+        }
+    }
+
+    let mut hits: Vec<SearchHit> = heap
+        .into_iter()
+        .map(|Reverse((size, name, path, is_dir))| SearchHit {
+            name,
+            path,
+            size,
+            is_dir,
+        })
+        .collect();
+    hits.sort_by(|a, b| b.size.cmp(&a.size).then_with(|| a.name.cmp(&b.name)));
+    hits
 }
 
-/// Same global-floor logic as prune_to_budget, exposed for expand_aggregate
-/// so the frontend gets a consistent threshold.
-pub fn global_floor_for(total_bytes: u64) -> u64 {
-    let f = ((total_bytes as f64) * 0.0001) as u64;
-    f.max(MIN_FILE_SIZE_ABS)
-}
-
-include!("../tests_repro.rs");
+#[cfg(test)]
+#[path = "scanner_tests.rs"]
+mod tests;

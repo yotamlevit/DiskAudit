@@ -212,6 +212,21 @@ button {
   user-select: text;
 }
 
+/* Notices (cancelled scan, root notes) — informational, not errors */
+.notice-banner {
+  margin: 12px 18px 0;
+  padding: 10px 14px;
+  border-radius: 8px;
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  background: rgba(245, 158, 11, 0.08);
+  color: var(--fg-1);
+  font-size: 12px;
+}
+.notice-banner.info {
+  border-color: rgba(56, 189, 248, 0.3);
+  background: rgba(56, 189, 248, 0.06);
+}
+
 /* Error */
 .error-banner {
   margin: 12px 18px;
@@ -651,6 +666,131 @@ button {
   color: var(--fg-3);
   font-style: italic;
   font-size: 11px;
+}
+
+/* Aggregate labels inside the treemap */
+.aggregate-label {
+  font-family: var(--font-ui);
+  font-size: 11px;
+  font-weight: 600;
+  fill: rgba(253, 230, 190, 0.95);
+}
+.aggregate-label-size {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  fill: rgba(253, 230, 190, 0.75);
+}
+.treemap-empty {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--fg-2);
+}
+
+/* Back button in breadcrumbs */
+.crumb.back {
+  font-size: 14px;
+  padding: 2px 10px;
+  border: 1px solid var(--border);
+  background: var(--bg-2);
+}
+
+/* List panel (aggregate expansion / full dir contents) */
+.list-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(5, 8, 14, 0.6);
+  backdrop-filter: blur(2px);
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 40px;
+}
+.list-panel {
+  width: min(860px, 100%);
+  max-height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-1);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  box-shadow: var(--shadow-2);
+  overflow: hidden;
+}
+.list-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-2);
+}
+.list-title {
+  flex: 1;
+  min-width: 0;
+}
+.list-title-name {
+  font-size: 10px;
+  color: var(--fg-3);
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+}
+.list-title-path {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--fg-0);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: text;
+}
+.list-meta {
+  color: var(--fg-2);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.list-body {
+  overflow: auto;
+  padding: 0 0 8px;
+}
+.list-more {
+  margin: 10px 14px;
+}
+.row-clickable {
+  cursor: pointer;
+}
+.row-clickable:hover td {
+  background: rgba(56, 189, 248, 0.08);
+}
+.tag {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  background: var(--bg-3);
+  color: var(--fg-2);
+  border: 1px solid var(--border);
+}
+.warn-tag {
+  color: var(--warn);
+  border-color: rgba(245, 158, 11, 0.4);
+}
+.kind {
+  color: var(--fg-3);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.stats-note {
+  margin-top: 10px;
+  color: var(--fg-3);
+  font-size: 11px;
+}
+.ext-other-row td {
+  color: var(--fg-3);
+  font-style: italic;
 }
 
 /* Empty state */

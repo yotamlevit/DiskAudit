@@ -1,0 +1,38 @@
+[package]
+name = "diskaudit"
+version = "0.1.0"
+description = "Read-only disk usage visualizer"
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+name = "diskaudit_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.0", features = [] }
+
+[dependencies]
+tauri = { version = "2.1", features = [] }
+tauri-plugin-dialog = "2.0"
+tokio = { version = "1", features = ["macros", "time", "rt"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+jwalk = "0.8"
+rayon = "1.10"
+dashmap = "6.1"
+parking_lot = "0.12"
+thiserror = "1.0"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = true
+incremental = false
+
+[profile.dev]
+opt-level = 1
+debug = 1
+incremental = true

@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Capability for the DiskAudit main window. Only the dialog plugin (open) is allowed — no filesystem write/read access through Tauri APIs. Filesystem reads happen only through our explicit, read-only Rust commands.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:window:default",
+    "core:event:default",
+    "dialog:allow-open"
+  ]
+}

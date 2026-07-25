@@ -61,6 +61,41 @@ describe("App (against mock backend)", () => {
     await screen.findByText("Largest files");
   }, 30000);
 
+  test("search finds files and context menu offers the three actions", async () => {
+    render(<App />);
+    const scanBtn = await screen.findByRole("button", { name: "Scan" });
+    await waitFor(() =>
+      expect((scanBtn as HTMLButtonElement).disabled).toBe(false)
+    );
+    fireEvent.click(scanBtn);
+    await waitFor(() => screen.getByText("Scan time"), { timeout: 15000 });
+
+    // Search: type a query, get ranked results.
+    const search = screen.getByPlaceholderText(/Search files and folders/);
+    fireEvent.focus(search);
+    fireEvent.change(search, { target: { value: "movies" } });
+    await waitFor(
+      () => {
+        expect(
+          document.querySelectorAll(".search-row").length
+        ).toBeGreaterThan(0);
+      },
+      { timeout: 5000 }
+    );
+
+    // Context menu on a search result.
+    const row = document.querySelector(".search-row") as HTMLElement;
+    fireEvent.contextMenu(row, { clientX: 100, clientY: 100 });
+    await screen.findByText("Reveal in Finder");
+    await screen.findByText("Copy Path");
+    await screen.findByText("Copy Delete Command");
+    expect(screen.getByText(/never deletes anything/)).toBeTruthy();
+
+    // Copy Path puts the path on the (mock) clipboard and shows a toast.
+    fireEvent.click(screen.getByText("Copy Path"));
+    await screen.findByText("Path copied.");
+  }, 30000);
+
   test("skipped panel opens with explanations", async () => {
     render(<App />);
     const scanBtn = await screen.findByRole("button", { name: "Scan" });

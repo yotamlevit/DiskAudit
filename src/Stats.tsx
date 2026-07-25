@@ -9,6 +9,11 @@ interface StatsProps {
   /** Open search filtered to this extension / category. */
   onExtClick: (ext: string) => void;
   onCategoryClick: (category: string) => void;
+  onContext?: (
+    target: { path: string; name: string; isDir: boolean },
+    x: number,
+    y: number
+  ) => void;
 }
 
 export default function Stats({
@@ -16,6 +21,7 @@ export default function Stats({
   onFileClick,
   onExtClick,
   onCategoryClick,
+  onContext,
 }: StatsProps) {
   const { stats, allocated_bytes } = summary;
   const total = allocated_bytes || 1;
@@ -162,6 +168,14 @@ export default function Stats({
                     className="row-clickable"
                     title="Show in the map"
                     onClick={() => onFileClick(f.path)}
+                    onContextMenu={(ev) => {
+                      ev.preventDefault();
+                      onContext?.(
+                        { path: f.path, name: f.name, isDir: false },
+                        ev.clientX,
+                        ev.clientY
+                      );
+                    }}
                   >
                     <td>
                       <span

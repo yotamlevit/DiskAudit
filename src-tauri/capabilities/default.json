@@ -1,12 +1,18 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the DiskAudit main window. Only the dialog plugin (open) is allowed — no filesystem write/read access through Tauri APIs. Filesystem reads happen only through our explicit, read-only Rust commands.",
+  "description": "Main-window capability. Grants, each with its justification: dialog:allow-open — the folder picker (open only, no save dialogs). opener:allow-reveal-item-in-dir — 'Reveal in Finder' on a scanned item; selects the file in Finder via NSWorkspace, mutates nothing. opener:allow-open-url — scoped to the x-apple.systempreferences: scheme only, to open the Full Disk Access pane when a scan hits permission walls; no web URLs can be opened. clipboard-manager:allow-write-text — 'Copy path' / 'Copy delete command' put text ON the clipboard; read access is deliberately not granted. No filesystem read/write access is granted through Tauri APIs at all: filesystem READS happen only inside the app's own Rust commands, and nothing in the app can write, move, delete, or execute anything.",
   "windows": ["main"],
   "permissions": [
     "core:default",
     "core:window:default",
     "core:event:default",
-    "dialog:allow-open"
+    "dialog:allow-open",
+    "opener:allow-reveal-item-in-dir",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [{ "url": "x-apple.systempreferences:*" }]
+    },
+    "clipboard-manager:allow-write-text"
   ]
 }

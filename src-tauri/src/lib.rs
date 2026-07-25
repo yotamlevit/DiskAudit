@@ -6,8 +6,23 @@
 // Path::canonicalize, and jwalk traversal (which only reads). Forbidden:
 // fs::write, fs::remove_*, fs::rename, fs::create_dir*, fs::set_permissions,
 // OpenOptions with .write/.create/.append, std::process::Command, any libc
-// calls that mutate. The Tauri capability (capabilities/default.json)
-// restricts the frontend to dialog:open only.
+// calls that mutate.
+//
+// Plugin surface (see capabilities/default.json for the frontend grants,
+// each justified there):
+//   * dialog        — folder picker (open only).
+//   * opener        — reveal-in-Finder (NSWorkspace "select in Finder") and
+//                     opening the Full Disk Access settings pane URL. It
+//                     never launches shells or arbitrary programs, and no
+//                     app code passes it anything but a scanned path or the
+//                     fixed settings URL.
+//   * clipboard-manager — WRITE-only ("Copy path" / "Copy delete command").
+//                     The app never reads the clipboard. The copied delete
+//                     command is plain text for the USER to paste into
+//                     Terminal; no code path in DiskAudit executes it.
+//   * window-state  — persists window size/position in app data.
+// None of these mutate the scanned filesystem.
+//
 // Test-only code (#[cfg(test)]) builds fixture trees under the OS temp dir;
 // none of it is compiled into the shipped app.
 
@@ -327,6 +342,9 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_window_state::Builder::default().build())
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             start_scan,

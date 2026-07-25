@@ -8,6 +8,11 @@ interface ListPanelProps {
   path: string;
   onClose: () => void;
   onOpenDir: (path: string, name: string) => void;
+  onContext?: (
+    target: { path: string; name: string; isDir: boolean },
+    x: number,
+    y: number
+  ) => void;
 }
 
 const PAGE = 500;
@@ -20,7 +25,12 @@ export const SKIP_LABELS: Record<SkipReason, string> = {
 
 /** Full, honest listing of one directory — what an aggregate ("smaller
  * items") block opens into. Every direct child, sorted by size. */
-export default function ListPanel({ path, onClose, onOpenDir }: ListPanelProps) {
+export default function ListPanel({
+  path,
+  onClose,
+  onOpenDir,
+  onContext,
+}: ListPanelProps) {
   const [listing, setListing] = useState<DirListing | null>(null);
   const [error, setError] = useState<string>("");
   const [loadingMore, setLoadingMore] = useState(false);
@@ -118,6 +128,14 @@ export default function ListPanel({ path, onClose, onOpenDir }: ListPanelProps) 
                   className={e.is_dir && !e.skip_reason ? "row-clickable" : ""}
                   onClick={() => {
                     if (e.is_dir && !e.skip_reason) onOpenDir(e.path, e.name);
+                  }}
+                  onContextMenu={(ev) => {
+                    ev.preventDefault();
+                    onContext?.(
+                      { path: e.path, name: e.name, isDir: e.is_dir },
+                      ev.clientX,
+                      ev.clientY
+                    );
                   }}
                 >
                   <td>

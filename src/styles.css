@@ -1127,6 +1127,105 @@ button {
   color: var(--fg-3);
 }
 
+/* Context menu */
+.ctx-menu {
+  position: fixed;
+  z-index: 200;
+  width: 260px;
+  background: var(--bg-1);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  box-shadow: var(--shadow-2);
+  padding: 4px;
+  font-size: 12px;
+}
+.ctx-title {
+  padding: 6px 10px 4px;
+  font-weight: 700;
+  color: var(--fg-2);
+  font-size: 11px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ctx-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-radius: 5px;
+  color: var(--fg-0);
+  padding: 6px 10px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.ctx-item:hover {
+  background: rgba(56, 189, 248, 0.12);
+}
+.ctx-sep {
+  height: 1px;
+  background: var(--border);
+  margin: 4px 6px;
+}
+.ctx-danger {
+  color: var(--danger);
+}
+.ctx-danger:hover {
+  background: rgba(239, 68, 68, 0.12);
+}
+.ctx-subtext {
+  display: block;
+  margin-top: 2px;
+  font-size: 10px;
+  color: var(--fg-3);
+  line-height: 1.35;
+}
+.ctx-subtext code {
+  font-family: var(--font-mono);
+}
+
+/* Toast */
+.toast {
+  position: fixed;
+  bottom: 22px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 300;
+  max-width: 560px;
+  padding: 10px 16px;
+  border-radius: 8px;
+  background: var(--bg-2);
+  border: 1px solid var(--border-strong);
+  color: var(--fg-0);
+  font-size: 12px;
+  box-shadow: var(--shadow-2);
+  animation: toast-in 0.18s ease-out;
+}
+.toast-danger {
+  border-color: rgba(239, 68, 68, 0.5);
+  background: rgba(76, 20, 20, 0.95);
+  color: #fecaca;
+}
+@media (prefers-color-scheme: light) {
+  .toast-danger {
+    background: #fdecec;
+    color: #7f1d1d;
+  }
+}
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+}
+
 /* Empty state */
 .empty-state {
   flex: 1;

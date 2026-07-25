@@ -18,6 +18,11 @@ interface TreemapProps {
   root: ViewNode;
   onDrillDown: (node: ViewNode) => void;
   highlight?: Highlight | null;
+  onContext?: (
+    target: { path: string; name: string; isDir: boolean },
+    x: number,
+    y: number
+  ) => void;
 }
 
 interface TooltipState {
@@ -41,7 +46,12 @@ const SKIP_TOOLTIP: Record<SkipReason, string> = {
     "System Data volume — its content is already counted at /Users, /Applications, etc.",
 };
 
-export default function Treemap({ root, onDrillDown, highlight }: TreemapProps) {
+export default function Treemap({
+  root,
+  onDrillDown,
+  highlight,
+  onContext,
+}: TreemapProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [size, setSize] = useState({ width: 800, height: 600 });
   const [tooltip, setTooltip] = useState<TooltipState>({
@@ -245,6 +255,19 @@ export default function Treemap({ root, onDrillDown, highlight }: TreemapProps) 
                   onMouseEnter={(e) => handleEnter(node, e)}
                   onMouseLeave={handleLeave}
                   onClick={() => handleClick(node)}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    if (isAggregate) {
+                      onDrillDown(d); // aggregate has no real path; list it
+                    } else {
+                      onContext?.(
+                        { path: d.path, name: d.name, isDir: d.is_dir },
+                        e.clientX,
+                        e.clientY
+                      );
+                    }
+                  }}
                   style={{ cursor: clickable ? "pointer" : "default" }}
                   role={clickable ? "button" : undefined}
                   aria-label={`${d.name}, ${formatBytes(value)}${

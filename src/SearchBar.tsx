@@ -19,6 +19,11 @@ interface SearchBarProps {
   request: SearchRequest | null;
   /** Navigate the treemap to dirPath; optionally highlight one child. */
   onNavigate: (dirPath: string, highlightPath?: string) => void;
+  onContext?: (
+    target: { path: string; name: string; isDir: boolean },
+    x: number,
+    y: number
+  ) => void;
 }
 
 const SIZE_OPTIONS: Array<{ label: string; value: number }> = [
@@ -28,7 +33,12 @@ const SIZE_OPTIONS: Array<{ label: string; value: number }> = [
   { label: "Over 1 GB", value: 1_000_000_000 },
 ];
 
-export default function SearchBar({ enabled, request, onNavigate }: SearchBarProps) {
+export default function SearchBar({
+  enabled,
+  request,
+  onNavigate,
+  onContext,
+}: SearchBarProps) {
   const [open, setOpen] = useState(false);
   const [text, setText] = useState("");
   const [ext, setExt] = useState("");
@@ -185,6 +195,14 @@ export default function SearchBar({ enabled, request, onNavigate }: SearchBarPro
                 key={h.path}
                 className="search-row"
                 onClick={() => pick(h)}
+                onContextMenu={(ev) => {
+                  ev.preventDefault();
+                  onContext?.(
+                    { path: h.path, name: h.name, isDir: h.is_dir },
+                    ev.clientX,
+                    ev.clientY
+                  );
+                }}
                 role="option"
                 aria-selected="false"
                 title={h.path}

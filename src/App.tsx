@@ -1,10 +1,19 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { invoke, listen, openDialog } from "./ipc";
+import {
+  copyText,
+  invoke,
+  listen,
+  openDialog,
+  openFdaSettings,
+  revealItem,
+} from "./ipc";
 import Treemap, { Highlight } from "./Treemap";
 import Stats from "./Stats";
 import ListPanel from "./ListPanel";
 import SearchBar, { SearchRequest } from "./SearchBar";
 import SkippedPanel from "./SkippedPanel";
+import ContextMenu, { MenuAction, MenuTarget } from "./ContextMenu";
+import { deleteCommand } from "./shell";
 import type {
   ProgressPayload,
   ScanDone,
@@ -46,6 +55,17 @@ export default function App() {
   const [searchReq, setSearchReq] = useState<SearchRequest | null>(null);
   const [recents, setRecents] = useState<RecentScan[]>(() => loadRecents());
   const [fdaDismissed, setFdaDismissed] = useState(false);
+  const [ctxMenu, setCtxMenu] = useState<{
+    x: number;
+    y: number;
+    target: MenuTarget;
+    canOpen: boolean;
+  } | null>(null);
+  const [toast, setToast] = useState<{
+    msg: string;
+    danger?: boolean;
+    ts: number;
+  } | null>(null);
 
   // Generation counter: each startScan bumps it; async results from an older
   // generation are dropped instead of clobbering the new scan's state.
@@ -258,6 +278,52 @@ export default function App() {
     [navigateToPath]
   );
 
+  // Toast auto-hide.
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), toast.danger ? 6000 : 3500);
+    return () => clearTimeout(t);
+  }, [toast]);
+
+  const openContext = useCallback(
+    (target: MenuTarget, x: number, y: number, canOpen = false) => {
+      setCtxMenu({ x, y, target, canOpen });
+    },
+    []
+  );
+
+  const handleMenuAction = useCallback(
+    async (action: MenuAction, target: MenuTarget) => {
+      try {
+        switch (action) {
+          case "open":
+            navigateToPath(target.path);
+            break;
+          case "reveal":
+            await revealItem(target.path);
+            break;
+          case "copy-path":
+            await copyText(target.path);
+            setToast({ msg: "Path copied.", ts: Date.now() });
+            break;
+          case "copy-delete":
+            await copyText(deleteCommand(target.path, target.isDir));
+            setToast({
+              msg:
+                "Delete command copied. Paste it in Terminal to run it — " +
+                "DiskAudit itself never deletes anything.",
+              danger: true,
+              ts: Date.now(),
+            });
+            break;
+        }
+      } catch (e) {
+        setToast({ msg: String(e), danger: true, ts: Date.now() });
+      }
+    },
+    [navigateToPath]
+  );
+
   // Keyboard: ⌘O browse, ⌘R rescan, Esc/Backspace/⌘↑ go up. (⌘F is handled
   // by the search bar; panels handle their own Esc in the capture phase.)
   const startScanRef = useRef(startScan);
@@ -428,8 +494,13 @@ export default function App() {
           {formatNumber(summary!.permission_errors)} item
           {summary!.permission_errors === 1 ? "" : "s"} couldn't be read —
           usually macOS privacy protection. Grant DiskAudit{" "}
-          <strong>Full Disk Access</strong> in System Settings → Privacy &amp;
-          Security, then rescan.{" "}
+          <strong>Full Disk Access</strong>, then rescan.{" "}
+          <button
+            className="link-btn"
+            onClick={() => openFdaSettings().catch(() => {})}
+          >
+            Open settings
+          </button>{" "}
           <button className="link-btn" onClick={() => setFdaDismissed(true)}>
             Dismiss
           </button>
@@ -515,6 +586,7 @@ export default function App() {
               enabled={phase === "done"}
               request={searchReq}
               onNavigate={navigateToPath}
+              onContext={(t, x, y) => openContext(t, x, y, true)}
             />
           </div>
           {tab === "treemap" && (
@@ -555,6 +627,7 @@ export default function App() {
                   root={current}
                   onDrillDown={drillDown}
                   highlight={highlight}
+                  onContext={openContext}
                 />
               </main>
             </>
@@ -563,6 +636,7 @@ export default function App() {
             <main className="stats-main">
               <Stats
                 summary={summary}
+                onContext={(t, x, y) => openContext(t, x, y, true)}
                 onFileClick={(filePath) => {
                   const parent = parentPath(filePath);
                   if (parent) navigateToPath(parent, filePath);
@@ -626,10 +700,30 @@ export default function App() {
           path={listPath}
           onClose={() => setListPath(null)}
           onOpenDir={openDirFromList}
+          onContext={(t, x, y) => openContext(t, x, y, true)}
         />
       )}
       {showSkipped && summary && (
         <SkippedPanel summary={summary} onClose={() => setShowSkipped(false)} />
+      )}
+      {ctxMenu && (
+        <ContextMenu
+          x={ctxMenu.x}
+          y={ctxMenu.y}
+          target={ctxMenu.target}
+          canOpen={ctxMenu.canOpen}
+          onAction={handleMenuAction}
+          onClose={() => setCtxMenu(null)}
+        />
+      )}
+      {toast && (
+        <div
+          className={`toast ${toast.danger ? "toast-danger" : ""}`}
+          role="status"
+          key={toast.ts}
+        >
+          {toast.msg}
+        </div>
       )}
     </div>
   );

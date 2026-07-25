@@ -8,6 +8,8 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen as tauriListen, UnlistenFn } from "@tauri-apps/api/event";
 import { open as tauriOpenDialog } from "@tauri-apps/plugin-dialog";
+import { revealItemInDir, openUrl } from "@tauri-apps/plugin-opener";
+import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 
 export type InvokeFn = <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>;
 export type ListenFn = <T>(
@@ -20,6 +22,12 @@ interface Ipc {
   invoke: InvokeFn;
   listen: ListenFn;
   openDialog: OpenDialogFn;
+  /** Open the enclosing folder in Finder with the item selected. */
+  revealItem: (path: string) => Promise<void>;
+  /** Put text on the clipboard (write-only; the app never reads it). */
+  copyText: (text: string) => Promise<void>;
+  /** Deep-link to System Settings → Privacy & Security → Full Disk Access. */
+  openFdaSettings: () => Promise<void>;
 }
 
 const hasTauri =
@@ -36,10 +44,19 @@ if (!hasTauri && import.meta.env.DEV) {
       const sel = await tauriOpenDialog({ directory: true, multiple: false });
       return typeof sel === "string" ? sel : null;
     },
+    revealItem: (path) => revealItemInDir(path),
+    copyText: (text) => writeText(text),
+    openFdaSettings: () =>
+      openUrl(
+        "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"
+      ),
   };
 }
 
 export const invoke = ipc.invoke;
 export const listen = ipc.listen;
 export const openDialog = ipc.openDialog;
+export const revealItem = ipc.revealItem;
+export const copyText = ipc.copyText;
+export const openFdaSettings = ipc.openFdaSettings;
 export const isMock = !hasTauri;

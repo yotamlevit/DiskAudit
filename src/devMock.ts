@@ -402,6 +402,20 @@ async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>): Promi
 }
 
 export const mockIpc = {
+  revealItem: async (path: string) => {
+    console.log("[mock] reveal in Finder:", path);
+  },
+  copyText: async (text: string) => {
+    console.log("[mock] copy to clipboard:", text);
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      /* clipboard may be unavailable in the browser; log is enough */
+    }
+  },
+  openFdaSettings: async () => {
+    console.log("[mock] open Full Disk Access settings");
+  },
   invoke: mockInvoke,
   listen: async <T>(event: string, handler: (e: { payload: T }) => void) => {
     if (event === "scan://progress") {

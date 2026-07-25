@@ -21,6 +21,9 @@ serde_json = "1.0"
 jwalk = "0.8"
 dashmap = "6.1"
 parking_lot = "0.12"
+tauri-plugin-opener = "2"
+tauri-plugin-clipboard-manager = "2"
+tauri-plugin-window-state = "2"
 
 # NOTE: no `panic = "abort"` here. The scan runs on a blocking thread wrapped
 # in catch_unwind (lib.rs); with abort, any panic in the scanner would kill

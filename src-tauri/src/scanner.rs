@@ -85,12 +85,22 @@ impl ScanCancelToken {
 
 // ----- Accumulator store ---------------------------------------------------
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct FileRec {
     pub name: String,
     /// Allocated bytes (0 for hardlink duplicates and unstattable files).
     pub size: u64,
+    /// Logical length (st_size). Duplicate grouping keys on THIS, never on
+    /// `size`, which is deliberately 0 for hardlink dupes and stat failures.
+    pub logical: u64,
+    /// Modification time, unix seconds (0 when unknown). Access times are
+    /// unreliable on macOS (noatime mounts), so mtime is the staleness signal.
+    pub mtime: i64,
     pub is_symlink: bool,
+    /// st_nlink > 1: deleting this one path frees nothing while other links
+    /// exist (possibly outside the scan root), so it is never a reclaimable
+    /// duplicate candidate.
+    pub hardlinked: bool,
 }
 
 /// Per-directory record. Built up during the walk; recursive totals are
@@ -424,6 +434,7 @@ pub fn walk(shared: &Arc<ScanShared>, policy: Arc<ScanPolicy>, on_progress: Arc<
                                 name: fname,
                                 size,
                                 is_symlink: true,
+                                ..Default::default()
                             });
                         } else if ft.is_dir() {
                             let child_path = entry.path();
@@ -458,15 +469,17 @@ pub fn walk(shared: &Arc<ScanShared>, policy: Arc<ScanPolicy>, on_progress: Arc<
                                     local_files.push(FileRec {
                                         name: fname,
                                         size: counted,
+                                        logical: md.len(),
+                                        mtime: md.mtime(),
                                         is_symlink: false,
+                                        hardlinked: md.nlink() > 1,
                                     });
                                 }
                                 Err(_) => {
                                     local_errors += 1;
                                     local_files.push(FileRec {
                                         name: fname,
-                                        size: 0,
-                                        is_symlink: false,
+                                        ..Default::default()
                                     });
                                 }
                             }

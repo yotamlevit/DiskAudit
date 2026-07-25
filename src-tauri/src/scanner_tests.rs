@@ -260,7 +260,8 @@ fn synth_dir(shared: &ScanShared, path: &str, files: Vec<(&str, u64)>, children:
         .map(|(n, size)| FileRec {
             name: n.to_string(),
             size,
-            is_symlink: false,
+            logical: size,
+            ..Default::default()
         })
         .collect();
     acc.children = children.into_iter().map(PathBuf::from).collect();

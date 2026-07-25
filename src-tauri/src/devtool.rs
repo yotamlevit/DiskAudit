@@ -2,6 +2,7 @@
 // print totals for comparison with `du`. Read-only like everything else.
 
 use crate::platform::ScanPolicy;
+use crate::reclaim;
 use crate::scanner;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
@@ -9,6 +10,13 @@ use std::sync::Arc;
 use std::time::Instant;
 
 pub fn scan_and_print(path: &str) {
+    scan_and_report(path, false, false);
+}
+
+/// Like scan_and_print, optionally appending the reclaimable-space report
+/// (and, on request, the duplicate pass — reads file contents, still
+/// read-only).
+pub fn scan_and_report(path: &str, show_reclaim: bool, run_dups: bool) {
     let root = PathBuf::from(path)
         .canonicalize()
         .unwrap_or_else(|_| PathBuf::from(path));
@@ -78,6 +86,80 @@ pub fn scan_and_print(path: &str) {
             view_started.elapsed()
         ),
         Err(e) => println!("view error: {e}"),
+    }
+
+    if !show_reclaim {
+        return;
+    }
+    if run_dups {
+        eprintln!("running duplicate pass (reads file contents, read-only)…");
+        let dup_started = Instant::now();
+        assert!(reclaim::try_begin_dup_scan(&shared));
+        reclaim::run_dup_scan(
+            &shared,
+            Arc::new(|phase, done, total, bytes| {
+                eprint!(
+                    "\r  {phase}: {done}/{total}  ({:.2} GB read)   ",
+                    bytes as f64 / 1e9
+                );
+            }),
+        );
+        eprintln!("\n  duplicate pass took {:?}", dup_started.elapsed());
+    }
+    let report = reclaim::build_report(&shared);
+    println!();
+    println!("== Reclaimable ==");
+    println!(
+        "headline:        {} bytes ({:.2} GB) — deduplicated union",
+        report.total,
+        report.total as f64 / 1e9
+    );
+    for g in &report.groups {
+        println!(
+            "  [{:?}/{:?}] {:24} {:>10.2} MB  {} items",
+            g.class,
+            g.confidence,
+            g.label,
+            g.total as f64 / 1e6,
+            g.count
+        );
+        for item in g.items.iter().take(8) {
+            println!(
+                "      {:>10.2} MB  {}  — {}",
+                item.size as f64 / 1e6,
+                item.path,
+                item.reason
+            );
+        }
+        if g.items.len() > 8 {
+            println!("      … {} more", g.items.len() - 8);
+        }
+    }
+    println!(
+        "  duplicates: status={} groups={} reclaimable={:.2} MB bytes_read={:.2} MB errors={}",
+        report.dup.status,
+        report.dup.group_count,
+        report.dup.reclaimable as f64 / 1e6,
+        report.dup.bytes_read as f64 / 1e6,
+        report.dup.errors,
+    );
+    for g in report.dup.groups.iter().take(10) {
+        println!(
+            "      {:>10.2} MB reclaimable — {} ({} copies)",
+            g.reclaimable as f64 / 1e6,
+            g.name,
+            g.copies.len()
+        );
+        for c in &g.copies {
+            let tag = if c.keep {
+                " [kept]"
+            } else if c.in_finding {
+                " [inside another finding]"
+            } else {
+                ""
+            };
+            println!("          {}{}", c.path, tag);
+        }
     }
 }
 

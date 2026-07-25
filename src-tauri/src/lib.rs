@@ -3,7 +3,11 @@
 // SECURITY INVARIANT (audited):
 // This crate must NEVER perform filesystem mutation. Allowed APIs are
 // strictly: std::fs::metadata, std::fs::symlink_metadata, std::fs::read_dir,
-// Path::canonicalize, and jwalk traversal (which only reads). Forbidden:
+// Path::canonicalize, jwalk traversal (which only reads), and — added for
+// duplicate detection, reclaim.rs ONLY — std::fs::File::open in read mode to
+// hash file contents. That last one is a deliberate, audited expansion of
+// the I/O surface: it opens with File::open (never OpenOptions), reads
+// bytes, and does nothing else with the handle. Forbidden everywhere:
 // fs::write, fs::remove_*, fs::rename, fs::create_dir*, fs::set_permissions,
 // OpenOptions with .write/.create/.append, std::process::Command, any libc
 // calls that mutate.
@@ -16,20 +20,28 @@
 //                     never launches shells or arbitrary programs, and no
 //                     app code passes it anything but a scanned path or the
 //                     fixed settings URL.
-//   * clipboard-manager — WRITE-only ("Copy path" / "Copy delete command").
-//                     The app never reads the clipboard. The copied delete
-//                     command is plain text for the USER to paste into
-//                     Terminal; no code path in DiskAudit executes it.
+//   * clipboard-manager — WRITE-only ("Copy path" / "Copy delete command",
+//                     and the Reclaimable tab's exports and generated
+//                     deletion scripts). The app never reads the clipboard.
+//                     Everything the Reclaimable feature produces — findings
+//                     exports (text/CSV/JSON) and deletion scripts — is
+//                     plain text placed ON the clipboard for the USER to
+//                     review and run themselves. No code path in DiskAudit
+//                     executes a script or shell command, and none may be
+//                     added; the app also never writes these artifacts to
+//                     disk (no save dialog, no export file, no temp file).
 //   * window-state  — persists window size/position in app data.
 // None of these mutate the scanned filesystem.
 //
-// Test-only code (#[cfg(test)]) builds fixture trees under the OS temp dir;
+// Test-only code (#[cfg(test)]) builds fixture trees under the OS temp dir
+// (including one /bin/cp -c invocation to create an APFS clone fixture);
 // none of it is compiled into the shipped app.
 
 mod categories;
 #[doc(hidden)]
 pub mod devtool;
 mod platform;
+mod reclaim;
 mod scanner;
 
 use parking_lot::Mutex;
@@ -91,9 +103,10 @@ async fn start_scan(
         }
     }
 
-    // Supersede any running scan.
+    // Supersede any running scan (and any duplicate pass on it).
     if let Some(prev) = state.current.lock().as_ref() {
         prev.token.cancel();
+        reclaim::cancel_dup_scan(prev);
     }
 
     let scan_id = state.next_scan_id.fetch_add(1, Ordering::SeqCst) + 1;
@@ -327,6 +340,80 @@ fn get_summary(state: State<'_, AppState>) -> Result<Option<ScanDone>, String> {
         .and_then(|s| s.summary.lock().clone()))
 }
 
+/// Reclaimable-space report: path-based findings (cheap, works live) merged
+/// with duplicate results when the separate duplicate pass has run.
+#[tauri::command]
+async fn get_reclaim(state: State<'_, AppState>) -> Result<reclaim::ReclaimReport, String> {
+    let shared = current_scan(&state)?;
+    tauri::async_runtime::spawn_blocking(move || Ok(reclaim::build_report(&shared)))
+        .await
+        .map_err(|e| format!("reclaim task failed: {e}"))?
+}
+
+#[derive(Serialize, Clone)]
+struct ReclaimProgressPayload {
+    scan_id: u64,
+    phase: String,
+    done: u64,
+    total: u64,
+    bytes_read: u64,
+}
+
+/// Start the staged duplicate-detection pass (separate from the scan, and
+/// the only code that reads file CONTENTS — read-only; see the SECURITY
+/// INVARIANT above). Resolves when the pass finishes or is cancelled.
+#[tauri::command]
+async fn start_dup_scan(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    let shared = current_scan(&state)?;
+    if !shared.is_complete() {
+        return Err("duplicate detection needs a finished scan".to_string());
+    }
+    if !reclaim::try_begin_dup_scan(&shared) {
+        return Err("duplicate detection is already running".to_string());
+    }
+    let scan_id = shared.scan_id;
+    let app_for_progress = app.clone();
+    let on_progress: Arc<reclaim::DupProgressCb> =
+        Arc::new(move |phase, done, total, bytes_read| {
+            let _ = app_for_progress.emit(
+                "reclaim://progress",
+                ReclaimProgressPayload {
+                    scan_id,
+                    phase: phase.to_string(),
+                    done,
+                    total,
+                    bytes_read,
+                },
+            );
+        });
+    let shared_task = shared.clone();
+    let joined = tauri::async_runtime::spawn_blocking(move || {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            reclaim::run_dup_scan(&shared_task, on_progress);
+        }))
+    })
+    .await;
+    match joined {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(_panic)) => {
+            reclaim::fail_dup_scan(&shared);
+            Err("Duplicate detection hit an internal error and was stopped.".to_string())
+        }
+        Err(e) => {
+            reclaim::fail_dup_scan(&shared);
+            Err(format!("duplicate scan task failed to run: {e}"))
+        }
+    }
+}
+
+#[tauri::command]
+fn cancel_dup_scan(state: State<'_, AppState>) -> Result<(), String> {
+    if let Some(cur) = state.current.lock().as_ref() {
+        reclaim::cancel_dup_scan(cur);
+    }
+    Ok(())
+}
+
 #[tauri::command]
 fn home_dir() -> Result<String, String> {
     platform::home_dir()
@@ -351,6 +438,9 @@ pub fn run() {
             list_dir,
             search_files,
             get_summary,
+            get_reclaim,
+            start_dup_scan,
+            cancel_dup_scan,
             home_dir
         ])
         .setup(|app| {

@@ -129,6 +129,15 @@ pub fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
+/// Does `base` look like a user home directory? True for any direct child of
+/// /Users and for the current $HOME (which may live elsewhere).
+fn looks_like_home(base: &Path) -> bool {
+    if base.parent() == Some(Path::new("/Users")) {
+        return true;
+    }
+    home_dir().map(|h| h == base).unwrap_or(false)
+}
+
 /// True for the per-user FileProvider cloud-sync mount points themselves:
 /// `<home>/Library/CloudStorage` and `<home>/Library/Mobile Documents`, for
 /// any home under /Users or the current $HOME. Deliberately exact — a folder
@@ -145,14 +154,141 @@ fn is_cloud_sync_dir(path: &Path) -> bool {
         return false;
     }
     // `path` = <base>/Library/<last>; require <base> to look like a home dir.
-    let base: &Path = match path.parent().and_then(|p| p.parent()) {
-        Some(b) => b,
-        None => return false,
-    };
-    if base.parent() == Some(Path::new("/Users")) {
-        return true;
+    match path.parent().and_then(|p| p.parent()) {
+        Some(base) => looks_like_home(base),
+        None => false,
     }
-    home_dir().map(|h| h == base).unwrap_or(false)
+}
+
+// ----- Reclaimable-space locations (macOS layout knowledge) ----------------
+//
+// Everything the reclaim detector knows about WHERE macOS keeps caches,
+// developer artifacts, Trash and device backups lives here. What those
+// findings mean (labels, confidence, safety wording) lives in reclaim.rs;
+// this module only answers "is this path one of the well-known spots?".
+// Matching is deliberately exact, like is_cloud_sync_dir above: a folder
+// named `Library/Caches` deep inside a project must NOT match.
+
+/// What a well-known reclaimable location holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReclaimKind {
+    /// Per-app caches (`~/Library/Caches/*`, `/Library/Caches/*`).
+    AppCache,
+    /// Developer tool caches (npm, cargo, go, gradle, `~/.cache/*`).
+    ToolCache,
+    /// Xcode regenerable state (DerivedData, DeviceSupport, simulator caches).
+    Xcode,
+    /// Trash contents — deleting is permanent (it's already the last stop).
+    Trash,
+    /// iOS/iPadOS device backups — NOT regenerable unless the device syncs
+    /// again; treated as "gone forever", never as a cache.
+    IosBackup,
+    /// Xcode build archives — builds of specific past commits; needed to
+    /// symbolicate old crash logs. "Gone forever", not regenerable.
+    XcodeArchive,
+}
+
+/// How a well-known location turns into findings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReclaimSite {
+    /// The directory itself is one finding.
+    SelfIsFinding(ReclaimKind),
+    /// Each direct child directory is its own finding (per-app granularity).
+    ChildrenAreFindings(ReclaimKind),
+    /// Scan this subtree's files for used installers (.dmg/.pkg/.xip/.ipsw).
+    InstallerDir,
+}
+
+/// Well-known spots relative to a home directory. `iOS DeviceSupport` and
+/// friends regenerate when a device reconnects; the cargo/go paths are the
+/// documented cache locations those tools rebuild on demand.
+const HOME_RELATIVE_SITES: &[(&str, ReclaimSite)] = &[
+    (
+        "Library/Caches",
+        ReclaimSite::ChildrenAreFindings(ReclaimKind::AppCache),
+    ),
+    (
+        ".cache",
+        ReclaimSite::ChildrenAreFindings(ReclaimKind::ToolCache),
+    ),
+    (
+        ".npm/_cacache",
+        ReclaimSite::SelfIsFinding(ReclaimKind::ToolCache),
+    ),
+    (
+        ".cargo/registry/cache",
+        ReclaimSite::SelfIsFinding(ReclaimKind::ToolCache),
+    ),
+    (
+        ".cargo/git/checkouts",
+        ReclaimSite::SelfIsFinding(ReclaimKind::ToolCache),
+    ),
+    (
+        "go/pkg/mod/cache",
+        ReclaimSite::SelfIsFinding(ReclaimKind::ToolCache),
+    ),
+    (
+        ".gradle/caches",
+        ReclaimSite::SelfIsFinding(ReclaimKind::ToolCache),
+    ),
+    (
+        "Library/Developer/Xcode/DerivedData",
+        ReclaimSite::SelfIsFinding(ReclaimKind::Xcode),
+    ),
+    (
+        "Library/Developer/Xcode/iOS DeviceSupport",
+        ReclaimSite::SelfIsFinding(ReclaimKind::Xcode),
+    ),
+    (
+        "Library/Developer/Xcode/watchOS DeviceSupport",
+        ReclaimSite::SelfIsFinding(ReclaimKind::Xcode),
+    ),
+    (
+        "Library/Developer/Xcode/tvOS DeviceSupport",
+        ReclaimSite::SelfIsFinding(ReclaimKind::Xcode),
+    ),
+    (
+        "Library/Developer/CoreSimulator/Caches",
+        ReclaimSite::SelfIsFinding(ReclaimKind::Xcode),
+    ),
+    (
+        "Library/Developer/Xcode/Archives",
+        ReclaimSite::SelfIsFinding(ReclaimKind::XcodeArchive),
+    ),
+    (
+        "Library/Application Support/MobileSync/Backup",
+        ReclaimSite::ChildrenAreFindings(ReclaimKind::IosBackup),
+    ),
+    (".Trash", ReclaimSite::SelfIsFinding(ReclaimKind::Trash)),
+    ("Downloads", ReclaimSite::InstallerDir),
+];
+
+/// Is `path` a well-known reclaimable location? `root` is the scan root
+/// (used for per-volume `.Trashes`). Exact matching only.
+pub fn reclaim_site(path: &Path, root: &Path) -> Option<ReclaimSite> {
+    // System-wide caches (visible when scanning `/`).
+    if path == Path::new("/Library/Caches") {
+        return Some(ReclaimSite::ChildrenAreFindings(ReclaimKind::AppCache));
+    }
+    // Per-volume Trash at the top of a scanned volume.
+    if path.file_name().is_some_and(|n| n == ".Trashes") && path.parent() == Some(root) {
+        return Some(ReclaimSite::SelfIsFinding(ReclaimKind::Trash));
+    }
+    // Home-relative spots, for any home-shaped base (/Users/* or $HOME).
+    for (rel, site) in HOME_RELATIVE_SITES {
+        let rel_path = Path::new(rel);
+        if path.ends_with(rel_path) {
+            // path = <base>/<rel>; require <base> to look like a home.
+            let mut base = path;
+            for _ in rel_path.components() {
+                base = base.parent()?;
+            }
+            if looks_like_home(base) {
+                return Some(*site);
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -202,5 +338,81 @@ mod tests {
     fn empty_dev_set_disables_filtering() {
         let policy = ScanPolicy::with_rules(HashSet::new(), Vec::new());
         assert_eq!(policy.skip_reason(Path::new("/a"), Some(42)), None);
+    }
+
+    #[test]
+    fn reclaim_sites_match_only_home_shaped_bases() {
+        let root = Path::new("/Users/alice");
+        assert_eq!(
+            reclaim_site(Path::new("/Users/alice/Library/Caches"), root),
+            Some(ReclaimSite::ChildrenAreFindings(ReclaimKind::AppCache))
+        );
+        assert_eq!(
+            reclaim_site(Path::new("/Users/alice/.Trash"), root),
+            Some(ReclaimSite::SelfIsFinding(ReclaimKind::Trash))
+        );
+        assert_eq!(
+            reclaim_site(
+                Path::new("/Users/alice/Library/Developer/Xcode/DerivedData"),
+                root
+            ),
+            Some(ReclaimSite::SelfIsFinding(ReclaimKind::Xcode))
+        );
+        assert_eq!(
+            reclaim_site(
+                Path::new("/Users/alice/Library/Application Support/MobileSync/Backup"),
+                root
+            ),
+            Some(ReclaimSite::ChildrenAreFindings(ReclaimKind::IosBackup))
+        );
+        assert_eq!(
+            reclaim_site(Path::new("/Users/alice/.cargo/registry/cache"), root),
+            Some(ReclaimSite::SelfIsFinding(ReclaimKind::ToolCache))
+        );
+        assert_eq!(
+            reclaim_site(Path::new("/Users/alice/Downloads"), root),
+            Some(ReclaimSite::InstallerDir)
+        );
+
+        // Near-misses that must NOT match: same names, wrong base.
+        assert_eq!(
+            reclaim_site(Path::new("/Users/alice/project/Library/Caches"), root),
+            None
+        );
+        assert_eq!(
+            reclaim_site(Path::new("/Users/alice/backup/.Trash"), root),
+            None
+        );
+        assert_eq!(
+            reclaim_site(Path::new("/Users/alice/website/Downloads"), root),
+            None
+        );
+        assert_eq!(
+            reclaim_site(Path::new("/Users/alice/dev/.cache"), root),
+            None
+        );
+        // A DerivedData copied somewhere else is someone's data, not Xcode's.
+        assert_eq!(
+            reclaim_site(Path::new("/Users/alice/old-mac/DerivedData"), root),
+            None
+        );
+    }
+
+    #[test]
+    fn volume_trashes_only_at_scan_root() {
+        let vol = Path::new("/Volumes/Backup");
+        assert_eq!(
+            reclaim_site(Path::new("/Volumes/Backup/.Trashes"), vol),
+            Some(ReclaimSite::SelfIsFinding(ReclaimKind::Trash))
+        );
+        assert_eq!(
+            reclaim_site(Path::new("/Volumes/Backup/deep/.Trashes"), vol),
+            None
+        );
+        // System-wide caches match when scanning /.
+        assert_eq!(
+            reclaim_site(Path::new("/Library/Caches"), Path::new("/")),
+            Some(ReclaimSite::ChildrenAreFindings(ReclaimKind::AppCache))
+        );
     }
 }

@@ -130,3 +130,108 @@ export interface ProgressPayload {
   errors: number;
   current: string;
 }
+
+// ----- Reclaimable-space payloads (src-tauri/src/reclaim.rs) ---------------
+
+/** Why a finding is reclaimable — determines how safe acting on it is. */
+export type ReclaimClass = "regenerable" | "disposable" | "duplicate" | "stale";
+export type ReclaimConfidence = "safe" | "careful" | "hint";
+
+export type ReclaimGroupKind =
+  | "app_cache"
+  | "tool_cache"
+  | "xcode"
+  | "build_artifact"
+  | "trash"
+  | "installer"
+  | "ios_backup"
+  | "xcode_archive"
+  | "stale";
+
+export interface ReclaimItem {
+  name: string;
+  path: string;
+  /** Allocated bytes (recursive for directories) — what deleting frees. */
+  size: number;
+  is_dir: boolean;
+  /** Unix seconds, when meaningful for this item. */
+  mtime?: number;
+  /** One line: what regenerates it, or what is lost. */
+  reason: string;
+}
+
+export interface ReclaimGroup {
+  kind: ReclaimGroupKind;
+  label: string;
+  blurb: string;
+  class: ReclaimClass;
+  confidence: ReclaimConfidence;
+  /** Total over ALL findings of this kind, including truncated ones. */
+  total: number;
+  count: number;
+  items: ReclaimItem[];
+  more_count?: number;
+  more_bytes?: number;
+}
+
+export interface DupCopy {
+  path: string;
+  /** Allocated bytes this copy occupies (freed if deleted). */
+  size: number;
+  mtime: number;
+  /** The copy the accounting keeps — never part of the number. */
+  keep?: boolean;
+  /** Lives inside another finding; counted there, shown for context only. */
+  in_finding?: boolean;
+}
+
+export interface DupGroup {
+  name: string;
+  /** Logical size of one copy. */
+  logical: number;
+  /** Freed by deleting every copy except the kept one. */
+  reclaimable: number;
+  copies: DupCopy[];
+}
+
+export type DupStatus =
+  | "not_started"
+  | "running"
+  | "done"
+  | "cancelled"
+  | "failed";
+
+export interface DupSummary {
+  status: DupStatus;
+  class?: ReclaimClass;
+  confidence?: ReclaimConfidence;
+  /** Reclaimable across ALL groups (incl. beyond the payload cap). */
+  reclaimable: number;
+  group_count: number;
+  groups: DupGroup[];
+  more_groups?: number;
+  more_bytes?: number;
+  /** Real I/O the pass performed. */
+  bytes_read: number;
+  files_hashed: number;
+  errors?: number;
+}
+
+export interface ReclaimReport {
+  scan_id: number;
+  /** False = scan still running; findings are partial and still growing. */
+  complete: boolean;
+  root: string;
+  /** Deduplicated union — the headline number. */
+  total: number;
+  groups: ReclaimGroup[];
+  dup: DupSummary;
+}
+
+export interface ReclaimProgress {
+  scan_id: number;
+  phase: "collecting" | "sampling" | "hashing";
+  done: number;
+  total: number;
+  bytes_read: number;
+}

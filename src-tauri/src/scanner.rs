@@ -124,13 +124,13 @@ pub struct DirAcc {
 }
 
 impl DirAcc {
-    fn new(name: String) -> Self {
+    pub(crate) fn new(name: String) -> Self {
         Self {
             name,
             ..Default::default()
         }
     }
-    fn skipped(name: String, reason: SkipReason) -> Self {
+    pub(crate) fn skipped(name: String, reason: SkipReason) -> Self {
         Self {
             name,
             skip: Some(reason),
@@ -168,6 +168,8 @@ pub struct ScanShared {
     pub cancelled: AtomicBool,
     pub counters: Counters,
     pub summary: Mutex<Option<ScanDone>>,
+    /// State of the (separate, explicitly-triggered) duplicate pass.
+    pub dup: Mutex<crate::reclaim::DupState>,
 }
 
 impl ScanShared {
@@ -186,6 +188,7 @@ impl ScanShared {
             cancelled: AtomicBool::new(false),
             counters: Counters::default(),
             summary: Mutex::new(None),
+            dup: Mutex::new(crate::reclaim::DupState::default()),
         }
     }
 
@@ -578,7 +581,10 @@ pub struct Totals {
 
 /// Compute recursive totals for every directory under `start` (iterative
 /// post-order; a visited-set guards against pathological cycles).
-fn compute_subtree_totals(shared: &ScanShared, start: &Path) -> HashMap<PathBuf, Totals> {
+pub(crate) fn compute_subtree_totals(
+    shared: &ScanShared,
+    start: &Path,
+) -> HashMap<PathBuf, Totals> {
     let mut memo: HashMap<PathBuf, Totals> = HashMap::new();
     let mut visited: HashSet<PathBuf> = HashSet::new();
     let mut stack: Vec<(PathBuf, bool)> = vec![(start.to_path_buf(), false)];
@@ -647,7 +653,7 @@ pub fn root_totals(shared: &ScanShared) -> Totals {
     cached_totals(shared, &shared.root)
 }
 
-fn cached_totals(shared: &ScanShared, path: &Path) -> Totals {
+pub(crate) fn cached_totals(shared: &ScanShared, path: &Path) -> Totals {
     shared
         .dirs
         .get(path)

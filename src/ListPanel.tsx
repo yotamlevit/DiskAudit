@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./ipc";
 import type { DirListing, SkipReason } from "./types";
 import { formatBytes, formatNumber } from "./format";
 import { categoryColor } from "./categories";

@@ -4,9 +4,19 @@ import { CATEGORIES, colorForExt, isCategory, categorize } from "./categories";
 
 interface StatsProps {
   summary: ScanDone;
+  /** Jump the treemap to this file (navigates to its folder + highlights). */
+  onFileClick: (path: string) => void;
+  /** Open search filtered to this extension / category. */
+  onExtClick: (ext: string) => void;
+  onCategoryClick: (category: string) => void;
 }
 
-export default function Stats({ summary }: StatsProps) {
+export default function Stats({
+  summary,
+  onFileClick,
+  onExtClick,
+  onCategoryClick,
+}: StatsProps) {
   const { stats, allocated_bytes } = summary;
   const total = allocated_bytes || 1;
 
@@ -21,7 +31,17 @@ export default function Stats({ summary }: StatsProps) {
               ? CATEGORIES[category]
               : { label: category, color: "var(--fg-3)" };
             return (
-              <div className="cat-bar-row" key={category}>
+              <div
+                className="cat-bar-row cat-bar-clickable"
+                key={category}
+                role="button"
+                tabIndex={0}
+                title={`Find all ${def.label.toLowerCase()} files`}
+                onClick={() => onCategoryClick(category)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") onCategoryClick(category);
+                }}
+              >
                 <div className="cat-bar-meta">
                   <span
                     className="cat-bar-swatch"
@@ -76,7 +96,16 @@ export default function Stats({ summary }: StatsProps) {
                 {stats.by_extension.map((e) => {
                   const pct = (e.size / total) * 100;
                   return (
-                    <tr key={e.ext}>
+                    <tr
+                      key={e.ext}
+                      className="row-clickable"
+                      title={
+                        e.ext
+                          ? `Find all .${e.ext} files`
+                          : "Find files with no extension"
+                      }
+                      onClick={() => onExtClick(e.ext)}
+                    >
                       <td>
                         <span
                           className="cat-bar-swatch"
@@ -128,7 +157,12 @@ export default function Stats({ summary }: StatsProps) {
               </thead>
               <tbody>
                 {stats.top_files.map((f, i) => (
-                  <tr key={f.path + ":" + i}>
+                  <tr
+                    key={f.path + ":" + i}
+                    className="row-clickable"
+                    title="Show in the map"
+                    onClick={() => onFileClick(f.path)}
+                  >
                     <td>
                       <span
                         className="cat-bar-swatch"

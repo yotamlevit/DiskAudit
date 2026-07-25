@@ -1131,6 +1131,8 @@ pub struct SearchQuery {
     pub text: String,
     pub min_size: u64,
     pub category: Option<String>,
+    /// Exact (lowercase) extension filter, e.g. "mp4".
+    pub ext: Option<String>,
     pub limit: usize,
 }
 
@@ -1165,9 +1167,10 @@ pub fn search(shared: &ScanShared, q: &SearchQuery) -> Vec<SearchHit> {
     for kv in shared.dirs.iter() {
         let dir_path = kv.key();
         let g = kv.value().lock();
-        // Directory hits (only for pure text searches — a category filter
-        // means "files of this kind").
+        // Directory hits (only for pure text searches — a category or
+        // extension filter means "files of this kind").
         if q.category.is_none()
+            && q.ext.is_none()
             && !needle.is_empty()
             && g.name.to_lowercase().contains(&needle)
             && dir_path != &shared.root
@@ -1189,9 +1192,17 @@ pub fn search(shared: &ScanShared, q: &SearchQuery) -> Vec<SearchHit> {
             if !needle.is_empty() && !f.name.to_lowercase().contains(&needle) {
                 continue;
             }
-            if let Some(cat) = &q.category {
-                if category_for_ext(&extract_ext(&f.name)) != cat.as_str() {
-                    continue;
+            if q.category.is_some() || q.ext.is_some() {
+                let fext = extract_ext(&f.name);
+                if let Some(ext) = &q.ext {
+                    if &fext != ext {
+                        continue;
+                    }
+                }
+                if let Some(cat) = &q.category {
+                    if category_for_ext(&fext) != cat.as_str() {
+                        continue;
+                    }
                 }
             }
             let fpath = dir_path.join(&f.name);

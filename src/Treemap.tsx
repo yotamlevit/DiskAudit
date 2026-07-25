@@ -9,9 +9,15 @@ import type { SkipReason, ViewNode } from "./types";
 import { formatBytes, formatNumber } from "./format";
 import { categorize, CATEGORIES, categoryColor, Category } from "./categories";
 
+export interface Highlight {
+  path: string;
+  ts: number;
+}
+
 interface TreemapProps {
   root: ViewNode;
   onDrillDown: (node: ViewNode) => void;
+  highlight?: Highlight | null;
 }
 
 interface TooltipState {
@@ -35,7 +41,7 @@ const SKIP_TOOLTIP: Record<SkipReason, string> = {
     "System Data volume — its content is already counted at /Users, /Applications, etc.",
 };
 
-export default function Treemap({ root, onDrillDown }: TreemapProps) {
+export default function Treemap({ root, onDrillDown, highlight }: TreemapProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [size, setSize] = useState({ width: 800, height: 600 });
   const [tooltip, setTooltip] = useState<TooltipState>({
@@ -188,16 +194,18 @@ export default function Treemap({ root, onDrillDown }: TreemapProps) {
 
               const value = node.value ?? d.size;
 
+              // Structural colors come from CSS variables so light mode
+              // works; category colors are theme-independent.
               let fill: string;
               if (isSkipped) {
-                fill = "rgba(120, 120, 135, 0.30)";
+                fill = "var(--map-skip-bg)";
               } else if (isAggregate) {
-                fill = "rgba(120, 95, 60, 0.5)";
+                fill = "var(--map-agg-bg)";
               } else if (isCapped) {
-                fill = "rgba(56, 102, 145, 0.55)";
+                fill = "var(--map-capped-bg)";
               } else if (isFolder) {
                 const t = Math.min(0.55, 0.18 + node.depth * 0.07);
-                fill = `rgba(30, 41, 59, ${t})`;
+                fill = `rgba(var(--map-folder-rgb), ${t})`;
               } else {
                 fill = categoryColor(d.name);
               }
@@ -257,13 +265,22 @@ export default function Treemap({ root, onDrillDown }: TreemapProps) {
                     strokeWidth={strokeWidth}
                     strokeDasharray={strokeDash}
                   />
+                  {highlight && d.path === highlight.path && (
+                    <rect
+                      key={highlight.ts}
+                      width={w}
+                      height={h}
+                      className="highlight-flash"
+                      pointerEvents="none"
+                    />
+                  )}
                   {/* Folder header strip */}
                   {isFolder && h > HEADER_HEIGHT + 2 && w > 30 && (
                     <>
                       <rect
                         width={w}
                         height={HEADER_HEIGHT}
-                        fill="rgba(15, 23, 42, 0.65)"
+                        fill="var(--map-header-bg)"
                         pointerEvents="none"
                       />
                       <text

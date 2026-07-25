@@ -428,6 +428,7 @@ fn search_by_name_size_and_category() {
             text: "holiday".into(),
             min_size: 0,
             category: None,
+            ext: None,
             limit: 10,
         },
     );
@@ -441,6 +442,7 @@ fn search_by_name_size_and_category() {
             text: String::new(),
             min_size: 1_000_000,
             category: Some("video".into()),
+            ext: None,
             limit: 10,
         },
     );

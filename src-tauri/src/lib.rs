@@ -283,6 +283,7 @@ async fn search_files(
     query: String,
     min_size: Option<u64>,
     category: Option<String>,
+    ext: Option<String>,
     limit: Option<usize>,
 ) -> Result<Vec<SearchHit>, String> {
     let shared = current_scan(&state)?;
@@ -293,6 +294,7 @@ async fn search_files(
                 text: query,
                 min_size: min_size.unwrap_or(0),
                 category,
+                ext: ext.map(|e| e.to_lowercase()),
                 limit: limit.unwrap_or(200),
             },
         )
@@ -321,6 +323,8 @@ fn home_dir() -> Result<String, String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState::default())
@@ -333,7 +337,64 @@ pub fn run() {
             get_summary,
             home_dir
         ])
-        .setup(|_app| Ok(()))
+        .setup(|app| {
+            // Standard macOS menu bar. The Edit submenu is what makes
+            // ⌘C/⌘V/⌘A work in the path and search inputs.
+            let open_item = MenuItemBuilder::with_id("open-folder", "Open Folder…")
+                .accelerator("CmdOrCtrl+O")
+                .build(app)?;
+            let rescan_item = MenuItemBuilder::with_id("rescan", "Rescan")
+                .accelerator("CmdOrCtrl+R")
+                .build(app)?;
+            let app_menu = SubmenuBuilder::new(app, "DiskAudit")
+                .about(None)
+                .separator()
+                .services()
+                .separator()
+                .hide()
+                .hide_others()
+                .show_all()
+                .separator()
+                .quit()
+                .build()?;
+            let file_menu = SubmenuBuilder::new(app, "File")
+                .item(&open_item)
+                .item(&rescan_item)
+                .separator()
+                .close_window()
+                .build()?;
+            let edit_menu = SubmenuBuilder::new(app, "Edit")
+                .undo()
+                .redo()
+                .separator()
+                .cut()
+                .copy()
+                .paste()
+                .select_all()
+                .build()?;
+            let view_menu = SubmenuBuilder::new(app, "View").fullscreen().build()?;
+            let window_menu = SubmenuBuilder::new(app, "Window")
+                .minimize()
+                .maximize()
+                .build()?;
+            let menu = MenuBuilder::new(app)
+                .items(&[&app_menu, &file_menu, &edit_menu, &view_menu, &window_menu])
+                .build()?;
+            app.set_menu(menu)?;
+            app.on_menu_event(|app, event| {
+                use tauri::Emitter;
+                match event.id().as_ref() {
+                    "open-folder" => {
+                        let _ = app.emit("menu://open-folder", ());
+                    }
+                    "rescan" => {
+                        let _ = app.emit("menu://rescan", ());
+                    }
+                    _ => {}
+                }
+            });
+            Ok(())
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

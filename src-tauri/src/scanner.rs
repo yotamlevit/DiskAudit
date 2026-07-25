@@ -755,3 +755,5 @@ pub fn global_floor_for(total_bytes: u64) -> u64 {
     let f = ((total_bytes as f64) * 0.0001) as u64;
     f.max(MIN_FILE_SIZE_ABS)
 }
+
+include!("../tests_repro.rs");

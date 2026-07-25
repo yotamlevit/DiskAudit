@@ -17,6 +17,12 @@ DiskAudit is built around one loop:
    Path**, or **Copy Delete Command** (puts an `rm` command on the clipboard
    for *you* to paste into Terminal — see the guarantee below). Or just drop
    a folder from Finder onto the window to scan it.
+4. **Reclaim** — the **Reclaimable** tab answers the question the map leaves
+   hanging: *which of these bytes don't I need?* Caches, build artifacts,
+   Trash, old installers, verified duplicate files and stale-file hints,
+   each labeled with **why** it's reclaimable and how safe acting on it is —
+   plus reviewable exports and a deliberately careful deletion-script
+   generator (see below).
 
 | Search anything by size and kind | Complete statistics |
 | --- | --- |
@@ -35,14 +41,79 @@ DiskAudit **never writes, moves, renames, or deletes anything**. This is
 enforced in three layers:
 
 - The Rust scanner uses only read APIs (`metadata`, `read_dir`, directory
-  traversal). There is no code path that opens a file for writing, removes
-  anything, or spawns a process. An audited security comment at the top of
-  `src-tauri/src/lib.rs` documents the allowed API surface.
+  traversal; duplicate detection additionally opens files **read-only** to
+  hash their contents). There is no code path that opens a file for writing,
+  removes anything, or spawns a process. An audited security comment at the
+  top of `src-tauri/src/lib.rs` documents the allowed API surface.
 - The UI layer (Tauri) is granted **no filesystem capability at all** — just
   the folder-open dialog, "reveal in Finder", and *write-only* clipboard
   access. Each grant is justified in `src-tauri/capabilities/default.json`.
-- "Copy Delete Command" only places text on the clipboard. Nothing in the app
-  can execute it; deleting remains a deliberate act you perform in Terminal.
+- Everything the app produces to act on — the single "Copy Delete Command",
+  the Reclaimable tab's exports, and its generated deletion scripts — is
+  **plain text placed on the clipboard**. DiskAudit never saves any of it to
+  disk (no export files, no temp files) and has no code path that executes a
+  script or shell command. Deleting remains a deliberate act you perform
+  yourself in Terminal.
+
+## Reclaimable space
+
+The Reclaimable tab lists space you could plausibly free, **grouped by the
+reason it's reclaimable** — because the reason determines how safe acting on
+it is:
+
+- **Regenerates automatically (safe).** App caches (`~/Library/Caches/*`),
+  developer tool caches (npm, cargo, Go, Gradle, `~/.cache/*`), Xcode
+  DerivedData / device support / simulator caches, and build artifacts
+  (`node_modules`, Rust `target`, `Pods`, `.venv`, `__pycache__`, `.next`,
+  Go/PHP `vendor`). Deleting these costs rebuild/re-download time, not data.
+- **Genuinely disposable, but gone forever (careful).** Trash contents,
+  installers (`.dmg`/`.pkg`/`.xip`/`.ipsw`) sitting in Downloads for 30+
+  days, Xcode archives, and iOS device backups (the last two are here — not
+  under "safe" — because they do *not* regenerate).
+- **Duplicates (careful).** Files with byte-identical content at several
+  paths, verified by hashing in a separate, explicitly-started, cancellable
+  pass (size grouping → head/tail sample → full hash, so only files that
+  already collided twice are fully read; the tab reports how much I/O it
+  actually did). The reclaimable figure is the group total **minus one kept
+  copy** — the kept copy is marked and never counted. Hardlinks are excluded
+  outright (deleting one path frees nothing).
+- **Stale (a hint, not a verdict).** Files over 500 MB not modified in over a
+  year — judged by **modification time**, because macOS mounts are typically
+  `noatime` and access times lie. Never flagged inside `~/Library` or
+  package-like folders (`.app`, `.photoslibrary`, …).
+
+Detection is **deliberately conservative**: ambiguous names need
+corroborating markers (`target` only counts with a sibling `Cargo.toml`,
+`.venv` needs `pyvenv.cfg`, bare `build`/`dist` are never flagged), nothing
+outside the scan root or touching skipped territory is ever offered, and a
+quiet tab means "nothing matched the rules", not "nothing could be freed".
+The headline number is a deduplicated union — a duplicate inside a flagged
+`node_modules` is never counted twice.
+
+**Exports** (selected findings or all of them): CSV — the default, with
+path, size, kind, category, confidence and reason, meant to be reviewed in a
+spreadsheet before anything is deleted — plus plain paths and JSON. Every
+export carries provenance: scan root, timestamp, total, DiskAudit version.
+
+**Deletion scripts** are generated from your explicit selection only
+(nothing is ever pre-selected), and are the most carefully engineered text
+the app produces:
+
+- **Move-to-Trash by default** (recoverable); permanent `rm -rf` is an
+  explicit, clearly-labeled alternative.
+- **Dry-run by default**: the script previews and exits unless run with
+  `--yes`.
+- `set -euo pipefail`; every path shell-quoted; a review comment (size,
+  category, why) above every entry; a provenance header.
+- Every step re-checks the path still exists, skips and reports anything
+  missing, never lets one failure abort the rest, and prints a `du`-measured
+  running total to reconcile against DiskAudit's estimate.
+- The generator **refuses** dangerous paths — `/`, your home, `~/Library`
+  and other protected locations, anything outside the scan root, nested
+  selections — and lists what it refused instead of emitting it.
+
+And to repeat the guarantee: script and exports are **clipboard text**. The
+app never writes them to disk and can never run them.
 
 ## Install / build
 
@@ -117,6 +188,14 @@ listings, and in the **Not scanned** panel with its reason:
 - The scanner keeps the whole scan in memory to serve drill-in, listing, and
   search queries instantly afterward; very large scans (millions of files)
   cost a few hundred MB of RAM.
+- **APFS clones are indistinguishable from real copies** in user space, so
+  duplicate detection may list clones — deleting one frees (almost) nothing.
+  Treat duplicate findings inside photo libraries and the like with care.
+- Reclaimable detection is deliberately conservative and **under-reports**:
+  Docker's data is never flagged (its VM image mixes caches with your
+  volumes), bare `build`/`dist` folders are never flagged, simulator devices
+  aren't (only their caches), and small findings are dropped below a floor.
+  An empty tab means nothing matched the rules, not that nothing could go.
 
 ## Development
 

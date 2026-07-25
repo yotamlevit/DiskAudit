@@ -7,6 +7,7 @@
 
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen as tauriListen, UnlistenFn } from "@tauri-apps/api/event";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open as tauriOpenDialog } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir, openUrl } from "@tauri-apps/plugin-opener";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
@@ -28,6 +29,12 @@ interface Ipc {
   copyText: (text: string) => Promise<void>;
   /** Deep-link to System Settings → Privacy & Security → Full Disk Access. */
   openFdaSettings: () => Promise<void>;
+  /** Native drag-and-drop of Finder items onto the window. */
+  onDragDrop: (handlers: {
+    onDrop: (paths: string[]) => void;
+    onEnter?: () => void;
+    onLeave?: () => void;
+  }) => Promise<UnlistenFn>;
 }
 
 const hasTauri =
@@ -50,6 +57,17 @@ if (!hasTauri && import.meta.env.DEV) {
       openUrl(
         "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"
       ),
+    onDragDrop: (handlers) =>
+      getCurrentWebview().onDragDropEvent((event) => {
+        const p = event.payload;
+        if (p.type === "drop" && p.paths.length > 0) {
+          handlers.onDrop(p.paths);
+        } else if (p.type === "enter" || p.type === "over") {
+          handlers.onEnter?.();
+        } else if (p.type === "leave") {
+          handlers.onLeave?.();
+        }
+      }),
   };
 }
 
@@ -59,4 +77,5 @@ export const openDialog = ipc.openDialog;
 export const revealItem = ipc.revealItem;
 export const copyText = ipc.copyText;
 export const openFdaSettings = ipc.openFdaSettings;
+export const onDragDrop = ipc.onDragDrop;
 export const isMock = !hasTauri;

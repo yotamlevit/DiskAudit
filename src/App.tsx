@@ -3,6 +3,7 @@ import {
   copyText,
   invoke,
   listen,
+  onDragDrop,
   openDialog,
   openFdaSettings,
   revealItem,
@@ -378,6 +379,32 @@ export default function App() {
     return () => unsubs.forEach((u) => u());
   }, []);
 
+  // Drop a folder from Finder anywhere on the window to scan it.
+  // (Dropping a file scans its enclosing folder — the backend resolves it.)
+  const [dragOver, setDragOver] = useState(false);
+  useEffect(() => {
+    let unsub: (() => void) | null = null;
+    onDragDrop({
+      onDrop: (paths) => {
+        setDragOver(false);
+        const p = paths[0];
+        if (p && phaseRef.current !== "scanning") {
+          setPath(p);
+          startScanRef.current(p);
+        }
+      },
+      onEnter: () => setDragOver(true),
+      onLeave: () => setDragOver(false),
+    })
+      .then((u) => {
+        unsub = u;
+      })
+      .catch(() => {});
+    return () => {
+      if (unsub) unsub();
+    };
+  }, []);
+
   const current = view?.root ?? null;
   const showResults = (phase === "done" || phase === "scanning") && current;
   const showFdaHint =
@@ -667,6 +694,7 @@ export default function App() {
             are. DiskAudit never writes, moves, or deletes anything.
           </p>
           <ul className="empty-tips">
+            <li>Drop any folder from Finder onto this window to scan it.</li>
             <li>Click a folder block to look inside it.</li>
             <li>Go back up with the ← button, breadcrumbs, Esc or ⌘↑.</li>
             <li>When the scan finishes, search with ⌘F.</li>
@@ -723,6 +751,11 @@ export default function App() {
           key={toast.ts}
         >
           {toast.msg}
+        </div>
+      )}
+      {dragOver && (
+        <div className="drop-overlay" aria-hidden="true">
+          <div className="drop-overlay-inner">Drop a folder to scan it</div>
         </div>
       )}
     </div>

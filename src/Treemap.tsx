@@ -93,11 +93,12 @@ export default function Treemap({
     const t = treemap<ViewNode>()
       .tile(treemapSquarify.ratio(1.4))
       .size([size.width, size.height])
+      .paddingInner(2)
       // Header strip on internal (folder) nodes for their name; the current
       // root doesn't need one (breadcrumbs show where you are).
+      // NOTE: paddingTop must come last — paddingOuter() would overwrite it
+      // (d3 treats outer as top+right+bottom+left).
       .paddingTop((d) => (d.depth === 0 ? 0 : HEADER_HEIGHT))
-      .paddingInner(2)
-      .paddingOuter(0)
       .round(true);
 
     return t(h);

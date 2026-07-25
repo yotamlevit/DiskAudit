@@ -4,6 +4,8 @@
 whole startup disk — and see every file as a block sized by the space it
 actually occupies. Find the big thing, understand what it is, and act on it.
 
+![Treemap view](docs/screenshots/treemap.png)
+
 DiskAudit is built around one loop:
 
 1. **Find** — the treemap starts filling in seconds into a scan and keeps
@@ -13,7 +15,19 @@ DiskAudit is built around one loop:
    statistics, open the full listing behind any "N smaller items" block.
 3. **Act** — right-click any file or folder: **Reveal in Finder**, **Copy
    Path**, or **Copy Delete Command** (puts an `rm` command on the clipboard
-   for *you* to paste into Terminal — see the guarantee below).
+   for *you* to paste into Terminal — see the guarantee below). Or just drop
+   a folder from Finder onto the window to scan it.
+
+| Search anything by size and kind | Complete statistics |
+| --- | --- |
+| ![Search](docs/screenshots/search.png) | ![Statistics](docs/screenshots/stats.png) |
+
+| Every "smaller items" block opens a full listing | Light mode |
+| --- | --- |
+| ![Listing](docs/screenshots/listing.png) | ![Light mode](docs/screenshots/treemap-light.png) |
+
+*(Screenshots show the built-in demo dataset rendered by the development
+mock — run a scan to see your own disk.)*
 
 ## The read-only guarantee
 

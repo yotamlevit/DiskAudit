@@ -77,11 +77,18 @@ async fn start_scan(
     path: String,
 ) -> Result<ScanDone, String> {
     let path_buf = PathBuf::from(&path);
-    let canonical = path_buf.canonicalize().unwrap_or(path_buf);
+    let mut canonical = path_buf.canonicalize().unwrap_or(path_buf);
     let md = std::fs::metadata(&canonical)
         .map_err(|e| format!("Cannot access {}: {}", canonical.to_string_lossy(), e))?;
     if !md.is_dir() {
-        return Err(format!("Not a directory: {}", canonical.to_string_lossy()));
+        // Forgiving: a dropped/typed FILE means "scan its enclosing folder".
+        match canonical.parent() {
+            Some(parent) if parent.as_os_str().is_empty() => {
+                return Err(format!("Not a directory: {}", canonical.to_string_lossy()))
+            }
+            Some(parent) => canonical = parent.to_path_buf(),
+            None => return Err(format!("Not a directory: {}", canonical.to_string_lossy())),
+        }
     }
 
     // Supersede any running scan.

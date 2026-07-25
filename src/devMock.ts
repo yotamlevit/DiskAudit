@@ -158,9 +158,9 @@ function findNode(root: MockNode, path: string): MockNode | null {
   return null;
 }
 
-function toView(n: MockNode, depth: number, budgetRef: { left: number }): ViewNode {
+function nodeShell(n: MockNode): ViewNode {
   const rec = n.is_dir ? countRec(n) : { files: 0, dirs: 0 };
-  const out: ViewNode = {
+  return {
     name: n.name,
     path: n.path,
     size: n.size,
@@ -170,41 +170,60 @@ function toView(n: MockNode, depth: number, budgetRef: { left: number }): ViewNo
     is_symlink: n.is_symlink,
     skip_reason: n.skip_reason,
   };
-  if (!n.is_dir || n.skip_reason) return out;
-  if (depth <= 0 || budgetRef.left <= 0) {
-    out.has_hidden_children = n.children.length > 0;
-    return out;
-  }
-  const sorted = [...n.children].sort((a, b) => b.size - a.size);
-  const floor = Math.max(1024, n.size * 0.002);
-  const kept: ViewNode[] = [];
-  let aggSize = 0;
-  let aggCount = 0;
-  let placed = 0;
-  sorted.forEach((c, i) => {
-    const remainderLarge = n.size - placed > n.size / 5;
-    if (budgetRef.left > 0 && kept.length < 300 && (i < 10 || c.size >= floor || remainderLarge)) {
-      budgetRef.left -= 1;
-      placed += c.size;
-      kept.push(toView(c, depth - 1, budgetRef));
-    } else {
-      aggSize += c.size;
-      aggCount += 1;
+}
+
+/** Bounded view, breadth-first with a node budget — mirrors the real
+ * backend's build_view so screenshots/tests are representative. */
+function toView(root: MockNode, maxDepth: number, budget: number): ViewNode {
+  const rootView = nodeShell(root);
+  let budgetLeft = budget - 1;
+  const queue: Array<{ node: MockNode; view: ViewNode; depth: number }> = [
+    { node: root, view: rootView, depth: 0 },
+  ];
+  while (queue.length > 0) {
+    const { node, view, depth } = queue.shift()!;
+    if (!node.is_dir || node.skip_reason) continue;
+    if (depth >= maxDepth || budgetLeft <= 0) {
+      view.has_hidden_children = node.children.length > 0;
+      continue;
     }
-  });
-  if (aggCount > 0) {
-    kept.push({
-      name: `${aggCount} smaller items`,
-      path: `${n.path}/\u{f8ff}aggregate`,
-      size: aggSize,
-      is_dir: false,
-      aggregated: true,
-      aggregated_count: aggCount,
-      aggregated_parent: n.path,
+    const sorted = [...node.children].sort((a, b) => b.size - a.size);
+    const floor = Math.max(1024, node.size * 0.002);
+    const kept: ViewNode[] = [];
+    let aggSize = 0;
+    let aggCount = 0;
+    let placed = 0;
+    sorted.forEach((c, i) => {
+      const remainderLarge = node.size - placed > node.size / 5;
+      if (
+        budgetLeft > 0 &&
+        kept.length < 300 &&
+        (i < 10 || c.size >= floor || remainderLarge)
+      ) {
+        budgetLeft -= 1;
+        placed += c.size;
+        const cv = nodeShell(c);
+        kept.push(cv);
+        queue.push({ node: c, view: cv, depth: depth + 1 });
+      } else {
+        aggSize += c.size;
+        aggCount += 1;
+      }
     });
+    if (aggCount > 0) {
+      kept.push({
+        name: `${aggCount} smaller items`,
+        path: `${node.path}/\u{f8ff}aggregate`,
+        size: aggSize,
+        is_dir: false,
+        aggregated: true,
+        aggregated_count: aggCount,
+        aggregated_parent: node.path,
+      });
+    }
+    view.children = kept;
   }
-  out.children = kept;
-  return out;
+  return rootView;
 }
 
 // ----- Mock state ----------------------------------------------------------
@@ -324,12 +343,15 @@ async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>): Promi
       const p = (args?.path as string | null) ?? TREE.path;
       const node = findNode(TREE, p);
       if (!node) throw `path is not part of this scan: ${p}`;
-      const budgetRef = { left: (args?.budget as number) ?? 3000 };
       const payload: ViewPayload = {
         scan_id: scanId,
         complete: scanDone,
         cancelled,
-        root: toView(node, (args?.depth as number) ?? 4, budgetRef),
+        root: toView(
+          node,
+          (args?.depth as number) ?? 4,
+          (args?.budget as number) ?? 3000
+        ),
       };
       return payload as unknown as T;
     }
@@ -416,6 +438,7 @@ export const mockIpc = {
   openFdaSettings: async () => {
     console.log("[mock] open Full Disk Access settings");
   },
+  onDragDrop: async () => () => {},
   invoke: mockInvoke,
   listen: async <T>(event: string, handler: (e: { payload: T }) => void) => {
     if (event === "scan://progress") {

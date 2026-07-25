@@ -58,8 +58,10 @@ export default function ContextMenu({
     };
   }, [onClose]);
 
-  const left = Math.min(x, window.innerWidth - MENU_W - 8);
-  const top = Math.min(y, window.innerHeight - height - 8);
+  const safeX = Number.isFinite(x) ? x : 0;
+  const safeY = Number.isFinite(y) ? y : 0;
+  const left = Math.max(8, Math.min(safeX, window.innerWidth - MENU_W - 8));
+  const top = Math.max(8, Math.min(safeY, window.innerHeight - height - 8));
 
   const act = (action: MenuAction) => {
     onAction(action, target);

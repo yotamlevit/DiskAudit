@@ -429,15 +429,12 @@ pub fn walk(shared: &Arc<ScanShared>, policy: Arc<ScanPolicy>, on_progress: Arc<
                             let child_path = entry.path();
                             let dev = entry.metadata().ok().map(|md| md.dev());
                             let skip = policy_w.skip_reason(&child_path, dev);
-                            shared_w
-                                .dirs
-                                .entry(child_path.clone())
-                                .or_insert_with(|| {
-                                    Mutex::new(match skip {
-                                        Some(r) => DirAcc::skipped(fname.clone(), r),
-                                        None => DirAcc::new(fname.clone()),
-                                    })
-                                });
+                            shared_w.dirs.entry(child_path.clone()).or_insert_with(|| {
+                                Mutex::new(match skip {
+                                    Some(r) => DirAcc::skipped(fname.clone(), r),
+                                    None => DirAcc::new(fname.clone()),
+                                })
+                            });
                             if skip.is_some() {
                                 // Do not descend.
                                 entry.read_children_path = None;
@@ -449,14 +446,13 @@ pub fn walk(shared: &Arc<ScanShared>, policy: Arc<ScanPolicy>, on_progress: Arc<
                             match entry.metadata() {
                                 Ok(md) => {
                                     let alloc = md.blocks() * 512;
-                                    let counted = if md.nlink() > 1
-                                        && !seen_w.insert((md.dev(), md.ino()))
-                                    {
-                                        local_hl_saved += alloc;
-                                        0
-                                    } else {
-                                        alloc
-                                    };
+                                    let counted =
+                                        if md.nlink() > 1 && !seen_w.insert((md.dev(), md.ino())) {
+                                            local_hl_saved += alloc;
+                                            0
+                                        } else {
+                                            alloc
+                                        };
                                     local_size += counted;
                                     local_logical += md.len();
                                     local_files.push(FileRec {
@@ -503,7 +499,8 @@ pub fn walk(shared: &Arc<ScanShared>, policy: Arc<ScanPolicy>, on_progress: Arc<
             c.bytes.fetch_add(local_size, Ordering::Relaxed);
             c.logical_bytes.fetch_add(local_logical, Ordering::Relaxed);
             c.symlinks.fetch_add(local_symlinks, Ordering::Relaxed);
-            c.hardlink_saved.fetch_add(local_hl_saved, Ordering::Relaxed);
+            c.hardlink_saved
+                .fetch_add(local_hl_saved, Ordering::Relaxed);
             c.errors.fetch_add(local_errors, Ordering::Relaxed);
 
             let now = now_ms();
@@ -1206,12 +1203,7 @@ pub fn search(shared: &ScanShared, q: &SearchQuery) -> Vec<SearchHit> {
                 }
             }
             let fpath = dir_path.join(&f.name);
-            push(
-                f.size,
-                &f.name,
-                fpath.to_string_lossy().to_string(),
-                false,
-            );
+            push(f.size, &f.name, fpath.to_string_lossy().to_string(), false);
         }
     }
 

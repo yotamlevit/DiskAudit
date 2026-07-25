@@ -33,9 +33,7 @@ mod platform;
 mod scanner;
 
 use parking_lot::Mutex;
-use scanner::{
-    DirListing, ProgressCb, ScanDone, ScanShared, SearchHit, SearchQuery, ViewPayload,
-};
+use scanner::{DirListing, ProgressCb, ScanDone, ScanShared, SearchHit, SearchQuery, ViewPayload};
 use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -83,10 +81,7 @@ async fn start_scan(
     let md = std::fs::metadata(&canonical)
         .map_err(|e| format!("Cannot access {}: {}", canonical.to_string_lossy(), e))?;
     if !md.is_dir() {
-        return Err(format!(
-            "Not a directory: {}",
-            canonical.to_string_lossy()
-        ));
+        return Err(format!("Not a directory: {}", canonical.to_string_lossy()));
     }
 
     // Supersede any running scan.
@@ -251,12 +246,8 @@ async fn get_view(
         .map(PathBuf::from)
         .unwrap_or_else(|| shared.root.clone());
     let result = tauri::async_runtime::spawn_blocking(move || {
-        let root = scanner::build_view(
-            &shared,
-            &target,
-            depth.unwrap_or(4),
-            budget.unwrap_or(3000),
-        )?;
+        let root =
+            scanner::build_view(&shared, &target, depth.unwrap_or(4), budget.unwrap_or(3000))?;
         Ok::<ViewPayload, String>(ViewPayload {
             scan_id: shared.scan_id,
             complete: shared.is_complete(),

@@ -419,7 +419,12 @@ fn search_by_name_size_and_category() {
         ],
         vec!["/synthetic/holiday-pics"],
     );
-    synth_dir(&shared, "/synthetic/holiday-pics", vec![("x.png", 50_000)], vec![]);
+    synth_dir(
+        &shared,
+        "/synthetic/holiday-pics",
+        vec![("x.png", 50_000)],
+        vec![],
+    );
     finalize(&shared);
 
     let hits = search(

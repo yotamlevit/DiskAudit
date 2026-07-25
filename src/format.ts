@@ -20,6 +20,24 @@ export function formatNumber(n: number): string {
   return n.toLocaleString();
 }
 
+/** Unix seconds → "Mar 12, 2024" (viewer's locale). */
+export function formatDate(unixSecs: number): string {
+  return new Date(unixSecs * 1000).toLocaleDateString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  });
+}
+
+/** Unix seconds → rough age like "8 months" or "2.5 years". */
+export function formatAge(unixSecs: number): string {
+  const days = Math.max(0, (Date.now() / 1000 - unixSecs) / 86400);
+  if (days < 60) return `${Math.round(days)} days`;
+  if (days < 365) return `${Math.round(days / 30.44)} months`;
+  const years = days / 365.25;
+  return `${years >= 10 ? Math.round(years) : years.toFixed(1)} years`;
+}
+
 export function formatDuration(ms: number): string {
   if (ms < 1000) return `${ms} ms`;
   const s = ms / 1000;

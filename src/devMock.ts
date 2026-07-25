@@ -8,6 +8,8 @@ import type {
   DirListing,
   DirEntry,
   ProgressPayload,
+  ReclaimProgress,
+  ReclaimReport,
   ScanDone,
   SearchHit,
   ViewNode,
@@ -57,8 +59,53 @@ function makeTree(): MockNode {
   for (const [name, budget, depth, breadth] of topDirs) {
     root.children.push(makeDir(`${root.path}/${name}`, name, budget, depth, breadth));
   }
-  // Skipped territory + symlink examples.
+  // Deterministic reclaimable territory (fixed sizes; the mock reclaim
+  // report below points at exactly these nodes).
+  const dir = (parent: MockNode, name: string): MockNode => {
+    const d: MockNode = {
+      name,
+      path: `${parent.path}/${name}`,
+      size: 0,
+      is_dir: true,
+      children: [],
+    };
+    parent.children.push(d);
+    return d;
+  };
+  const fileIn = (parent: MockNode, name: string, size: number) => {
+    parent.children.push({
+      name,
+      path: `${parent.path}/${name}`,
+      size,
+      is_dir: false,
+      children: [],
+    });
+  };
   const lib = root.children.find((c) => c.name === "Library")!;
+  const caches = dir(lib, "Caches");
+  fileIn(dir(caches, "com.apple.Safari"), "Cache.db", 3.2e9);
+  fileIn(dir(caches, "Google"), "chrome-cache.bin", 1.4e9);
+  fileIn(dir(caches, "Homebrew"), "downloads.tar", 0.9e9);
+  const code = root.children.find((c) => c.name === "Code")!;
+  const webapp = dir(code, "webapp");
+  fileIn(webapp, "package.json", 2048);
+  fileIn(dir(webapp, "node_modules"), "blobs.bin", 2.6e9);
+  const rustproj = dir(code, "rustproj");
+  fileIn(rustproj, "Cargo.toml", 512);
+  fileIn(dir(rustproj, "target"), "artifacts.bin", 1.9e9);
+  const trash = dir(root, ".Trash");
+  fileIn(trash, "old-project.zip", 0.9e9);
+  fileIn(trash, "screen-recording.mov", 0.3e9);
+  const downloads = root.children.find((c) => c.name === "Downloads")!;
+  fileIn(downloads, "Xcode_15.4.xip", 3.4e9);
+  fileIn(downloads, "OldTool.dmg", 0.8e9);
+  const movies = root.children.find((c) => c.name === "Movies")!;
+  fileIn(movies, "archive-2019.mov", 2.2e9);
+  fileIn(root.children.find((c) => c.name === "Pictures")!, "export-final.jpg", 0.6e9);
+  fileIn(root.children.find((c) => c.name === "Documents")!, "export-final.jpg", 0.6e9);
+  fileIn(root.children.find((c) => c.name === "Desktop")!, "export-final (copy).jpg", 0.6e9);
+
+  // Skipped territory + symlink examples.
   lib.children.push({
     name: "CloudStorage",
     path: `${lib.path}/CloudStorage`,
@@ -233,6 +280,155 @@ let scanId = 0;
 let scanDone = false;
 let cancelled = false;
 let listeners: Array<(e: { payload: ProgressPayload }) => void> = [];
+let reclaimListeners: Array<(e: { payload: ReclaimProgress }) => void> = [];
+let dupStatus: "not_started" | "running" | "done" | "cancelled" = "not_started";
+let dupCancelRequested = false;
+
+const HOME = "/Users/you";
+
+/** The mock reclaim report: hand-built, pointing at the fixed nodes above. */
+function mockReclaim(): ReclaimReport {
+  const item = (
+    path: string,
+    size: number,
+    isDir: boolean,
+    reason: string,
+    mtime?: number
+  ) => ({
+    name: path.split("/").pop()!,
+    path,
+    size,
+    is_dir: isDir,
+    mtime,
+    reason,
+  });
+  const yearAgo = Math.floor(Date.now() / 1000) - 500 * 86400;
+  const groups: ReclaimReport["groups"] = [
+    {
+      kind: "app_cache",
+      label: "App caches",
+      blurb:
+        "Apps rebuild these as needed. Deleting costs a slower first launch, not data.",
+      class: "regenerable",
+      confidence: "safe",
+      total: 5.5e9,
+      count: 3,
+      items: [
+        item(`${HOME}/Library/Caches/com.apple.Safari`, 3.2e9, true, "Cache — rebuilt automatically as needed"),
+        item(`${HOME}/Library/Caches/Google`, 1.4e9, true, "Cache — rebuilt automatically as needed"),
+        item(`${HOME}/Library/Caches/Homebrew`, 0.9e9, true, "Cache — rebuilt automatically as needed"),
+      ],
+    },
+    {
+      kind: "build_artifact",
+      label: "Build artifacts",
+      blurb: "Recreated by each project's own install or build step.",
+      class: "regenerable",
+      confidence: "safe",
+      total: 4.5e9,
+      count: 2,
+      items: [
+        item(`${HOME}/Code/webapp/node_modules`, 2.6e9, true, "Recreate with npm / yarn / pnpm install"),
+        item(`${HOME}/Code/rustproj/target`, 1.9e9, true, "Recreate with cargo build"),
+      ],
+    },
+    {
+      kind: "installer",
+      label: "Used installers",
+      blurb:
+        "Installers in Downloads older than 30 days. Most can be re-downloaded; old versions maybe not.",
+      class: "disposable",
+      confidence: "careful",
+      total: 4.2e9,
+      count: 2,
+      items: [
+        item(`${HOME}/Downloads/Xcode_15.4.xip`, 3.4e9, false, "Installer sitting in Downloads for 30+ days — likely already used", yearAgo),
+        item(`${HOME}/Downloads/OldTool.dmg`, 0.8e9, false, "Installer sitting in Downloads for 30+ days — likely already used", yearAgo),
+      ],
+    },
+    {
+      kind: "stale",
+      label: "Stale large files",
+      blurb:
+        "Big files untouched for over a year — judged by modification time, because access times are unreliable on macOS. Review before acting.",
+      class: "stale",
+      confidence: "hint",
+      total: 2.2e9,
+      count: 1,
+      items: [
+        item(`${HOME}/Movies/archive-2019.mov`, 2.2e9, false, "Large and not modified in over a year (by modification time)", yearAgo),
+      ],
+    },
+    {
+      kind: "trash",
+      label: "Trash",
+      blurb: "Already deleted once. Emptying is permanent.",
+      class: "disposable",
+      confidence: "careful",
+      total: 1.2e9,
+      count: 1,
+      items: [
+        item(`${HOME}/.Trash`, 1.2e9, true, "Already sent to the Trash — emptying is permanent"),
+      ],
+    },
+  ];
+  const dupDone = dupStatus === "done";
+  const dupReclaim = dupDone ? 1.2e9 : 0;
+  return {
+    scan_id: scanId,
+    complete: scanDone,
+    root: HOME,
+    total: 17.6e9 + dupReclaim,
+    groups,
+    dup: {
+      status: dupStatus,
+      class: "duplicate",
+      confidence: "careful",
+      reclaimable: dupReclaim,
+      group_count: dupDone ? 1 : 0,
+      groups: dupDone
+        ? [
+            {
+              name: "export-final.jpg",
+              logical: 0.6e9,
+              reclaimable: 1.2e9,
+              copies: [
+                { path: `${HOME}/Pictures/export-final.jpg`, size: 0.6e9, mtime: yearAgo, keep: true },
+                { path: `${HOME}/Documents/export-final.jpg`, size: 0.6e9, mtime: yearAgo },
+                { path: `${HOME}/Desktop/export-final (copy).jpg`, size: 0.6e9, mtime: yearAgo },
+              ],
+            },
+          ]
+        : [],
+      bytes_read: dupDone ? 1.9e9 : 0,
+      files_hashed: dupDone ? 4 : 0,
+    },
+  };
+}
+
+async function mockDupScan(): Promise<void> {
+  dupStatus = "running";
+  dupCancelRequested = false;
+  const phases: Array<ReclaimProgress["phase"]> = ["sampling", "hashing"];
+  for (const phase of phases) {
+    for (let i = 1; i <= 4; i++) {
+      if (dupCancelRequested) {
+        dupStatus = "cancelled";
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 60));
+      const payload: ReclaimProgress = {
+        scan_id: scanId,
+        phase,
+        done: i,
+        total: 4,
+        bytes_read: phase === "hashing" ? i * 0.4e9 : i * 0.1e6,
+      };
+      reclaimListeners.forEach((l) => l({ payload }));
+    }
+  }
+  dupStatus = "done";
+}
 
 function summary(): ScanDone {
   const rec = countRec(TREE);
@@ -314,6 +510,8 @@ async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>): Promi
       scanId += 1;
       scanDone = false;
       cancelled = false;
+      dupStatus = "not_started";
+      dupCancelRequested = false;
       const total = countRec(TREE);
       // Simulated progressive scan: ~3s of progress events.
       const steps = 24;
@@ -339,6 +537,18 @@ async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>): Promi
       return undefined as unknown as T;
     case "get_summary":
       return (scanDone ? summary() : null) as unknown as T;
+    case "get_reclaim":
+      if (scanId === 0) throw "no scan in progress or cached; start a scan first";
+      return mockReclaim() as unknown as T;
+    case "start_dup_scan": {
+      if (!scanDone) throw "duplicate detection needs a finished scan";
+      if (dupStatus === "running") throw "duplicate detection is already running";
+      await mockDupScan();
+      return undefined as unknown as T;
+    }
+    case "cancel_dup_scan":
+      dupCancelRequested = true;
+      return undefined as unknown as T;
     case "get_view": {
       const p = (args?.path as string | null) ?? TREE.path;
       const node = findNode(TREE, p);
@@ -446,6 +656,13 @@ export const mockIpc = {
       listeners.push(h);
       return () => {
         listeners = listeners.filter((l) => l !== h);
+      };
+    }
+    if (event === "reclaim://progress") {
+      const h = handler as unknown as (e: { payload: ReclaimProgress }) => void;
+      reclaimListeners.push(h);
+      return () => {
+        reclaimListeners = reclaimListeners.filter((l) => l !== h);
       };
     }
     return () => {};

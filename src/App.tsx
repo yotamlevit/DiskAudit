@@ -11,12 +11,15 @@ import {
 import Treemap, { Highlight } from "./Treemap";
 import Stats from "./Stats";
 import ListPanel from "./ListPanel";
+import Reclaim from "./Reclaim";
 import SearchBar, { SearchRequest } from "./SearchBar";
 import SkippedPanel from "./SkippedPanel";
 import ContextMenu, { MenuAction, MenuTarget } from "./ContextMenu";
 import { deleteCommand } from "./shell";
 import type {
   ProgressPayload,
+  ReclaimProgress,
+  ReclaimReport,
   ScanDone,
   ViewNode,
   ViewPayload,
@@ -27,7 +30,7 @@ import { loadRecents, saveRecent, RecentScan } from "./recents";
 import type { Category } from "./categories";
 
 type Phase = "idle" | "scanning" | "done" | "error";
-type Tab = "treemap" | "stats";
+type Tab = "treemap" | "stats" | "reclaim";
 
 const VIEW_DEPTH = 4;
 const VIEW_BUDGET = 3000;
@@ -56,6 +59,10 @@ export default function App() {
   const [searchReq, setSearchReq] = useState<SearchRequest | null>(null);
   const [recents, setRecents] = useState<RecentScan[]>(() => loadRecents());
   const [fdaDismissed, setFdaDismissed] = useState(false);
+  const [home, setHome] = useState<string>("");
+  const [reclaim, setReclaim] = useState<ReclaimReport | null>(null);
+  const [dupProgress, setDupProgress] = useState<ReclaimProgress | null>(null);
+  const [dupActive, setDupActive] = useState(false);
   const [ctxMenu, setCtxMenu] = useState<{
     x: number;
     y: number;
@@ -77,10 +84,14 @@ export default function App() {
   const viewCache = useRef<Map<string, ViewPayload>>(new Map());
 
   // Resolve home dir as the default path once on mount. (Keyed on nothing:
-  // clearing the input must NOT repopulate it.)
+  // clearing the input must NOT repopulate it.) Also kept for the deletion
+  // script's protected-path checks.
   useEffect(() => {
     invoke<string>("home_dir")
-      .then((h) => setPath((p) => p || h))
+      .then((h) => {
+        setPath((p) => p || h);
+        setHome(h);
+      })
       .catch(() => {});
   }, []);
 
@@ -96,6 +107,68 @@ export default function App() {
     return () => {
       if (unlisten) unlisten();
     };
+  }, []);
+
+  // Duplicate-pass progress ticker.
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    listen<ReclaimProgress>("reclaim://progress", (event) => {
+      setDupProgress(event.payload);
+    }).then((u) => {
+      unlisten = u;
+    });
+    return () => {
+      if (unlisten) unlisten();
+    };
+  }, []);
+
+  const fetchReclaim = useCallback(async () => {
+    const gen = genRef.current;
+    try {
+      const r = await invoke<ReclaimReport>("get_reclaim");
+      if (genRef.current !== gen) return;
+      setReclaim(r);
+    } catch {
+      // No scan yet, or a race during startup — the next call succeeds.
+    }
+  }, []);
+
+  // Fetch findings when a scan completes (feeds the summary-bar headline)…
+  useEffect(() => {
+    if (phase === "done") fetchReclaim();
+  }, [phase, fetchReclaim]);
+  // …poll them while a scan streams in with the tab open (partial, labeled
+  // as such)…
+  useEffect(() => {
+    if (phase !== "scanning" || tab !== "reclaim") return;
+    fetchReclaim();
+    const iv = setInterval(fetchReclaim, 2500);
+    return () => clearInterval(iv);
+  }, [phase, tab, fetchReclaim]);
+  // …and make sure opening the tab never shows a stale blank.
+  useEffect(() => {
+    if (tab === "reclaim" && !reclaim) fetchReclaim();
+  }, [tab, reclaim, fetchReclaim]);
+
+  const startDup = useCallback(async () => {
+    setDupProgress(null);
+    setDupActive(true);
+    try {
+      await invoke("start_dup_scan");
+    } catch (e) {
+      setToast({ msg: String(e), danger: true, ts: Date.now() });
+    } finally {
+      setDupActive(false);
+      fetchReclaim();
+    }
+  }, [fetchReclaim]);
+
+  const cancelDup = useCallback(async () => {
+    try {
+      await invoke("cancel_dup_scan");
+    } catch {
+      /* noop */
+    }
   }, []);
 
   const fetchView = useCallback(async (targetPath?: string) => {
@@ -195,6 +268,9 @@ export default function App() {
     setTab("treemap");
     setProgress(ZERO_PROGRESS);
     setErrorMsg("");
+    setReclaim(null);
+    setDupProgress(null);
+    setDupActive(false);
     viewCache.current.clear();
     try {
       const done = await invoke<ScanDone>("start_scan", { path: target });
@@ -542,6 +618,33 @@ export default function App() {
               {formatBytes(summary.allocated_bytes)}
             </span>
           </div>
+          {reclaim && (
+            <button
+              className="summary-cell summary-clickable"
+              onClick={() => setTab("reclaim")}
+              title={
+                reclaim.dup.status === "done"
+                  ? "What could plausibly be freed, and why"
+                  : "What could plausibly be freed (before duplicate detection)"
+              }
+            >
+              <span className="summary-label">Reclaimable</span>
+              <span className="summary-value reclaimable">
+                ≈ {formatBytes(reclaim.total)}
+                {summary.allocated_bytes > 0 && (
+                  <span className="summary-sub">
+                    {" "}
+                    {(
+                      (reclaim.total / summary.allocated_bytes) *
+                      100
+                    ).toFixed(0)}
+                    %
+                  </span>
+                )}{" "}
+                <span className="summary-more">›</span>
+              </span>
+            </button>
+          )}
           <div className="summary-cell">
             <span className="summary-label">Files</span>
             <span className="summary-value">
@@ -608,6 +711,15 @@ export default function App() {
               >
                 Statistics
               </button>
+              <button
+                className={`view-tab ${tab === "reclaim" ? "active" : ""}`}
+                onClick={() => setTab("reclaim")}
+                role="tab"
+                aria-selected={tab === "reclaim"}
+                title="What could plausibly be freed, and why"
+              >
+                Reclaimable
+              </button>
             </div>
             <SearchBar
               enabled={phase === "done"}
@@ -671,6 +783,24 @@ export default function App() {
                 onExtClick={(ext) => setSearchReq({ ext, text: "" })}
                 onCategoryClick={(cat) =>
                   setSearchReq({ category: cat as Category, text: "" })
+                }
+              />
+            </main>
+          )}
+          {tab === "reclaim" && (
+            <main className="stats-main">
+              <Reclaim
+                report={reclaim}
+                scanning={phase === "scanning"}
+                dupActive={dupActive}
+                dupProgress={dupProgress}
+                home={home}
+                onStartDup={startDup}
+                onCancelDup={cancelDup}
+                onNavigate={navigateToPath}
+                onContext={(t, x, y) => openContext(t, x, y, true)}
+                onToast={(msg, danger) =>
+                  setToast({ msg, danger, ts: Date.now() })
                 }
               />
             </main>

@@ -1,8 +1,18 @@
 // End-to-end smoke test of the whole frontend against the dev mock backend
 // (src/devMock.ts): scan → streaming summary → treemap → drill → breadcrumbs.
-import { describe, expect, test } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, describe, expect, test } from "vitest";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import App from "../App";
+
+// Vitest globals are off, so testing-library can't auto-register cleanup;
+// without this every test keeps the previous App mounted.
+afterEach(cleanup);
 
 describe("App (against mock backend)", () => {
   test("idle → scan → map renders → drill down and back", async () => {
@@ -94,6 +104,107 @@ describe("App (against mock backend)", () => {
     // Copy Path puts the path on the (mock) clipboard and shows a toast.
     fireEvent.click(screen.getByText("Copy Path"));
     await screen.findByText("Path copied.");
+  }, 30000);
+
+  test("reclaimable tab: headline, groups, explicit selection, script modal", async () => {
+    render(<App />);
+    const scanBtn = await screen.findByRole("button", { name: "Scan" });
+    await waitFor(() =>
+      expect((scanBtn as HTMLButtonElement).disabled).toBe(false)
+    );
+    fireEvent.click(scanBtn);
+    await waitFor(() => screen.getByText("Scan time"), { timeout: 15000 });
+
+    // The headline metric appears in the summary bar; clicking opens the tab.
+    const cell = await screen.findByTitle(
+      "What could plausibly be freed (before duplicate detection)"
+    );
+    expect(cell.textContent).toContain("Reclaimable");
+    expect(cell.textContent).toContain("%");
+    fireEvent.click(cell);
+    await screen.findByText(/plausibly reclaimable/);
+
+    // Groups arrive sorted by size with visible confidence classes.
+    await screen.findByText("App caches");
+    expect(screen.getByText("Build artifacts")).toBeTruthy();
+    expect(screen.getByText("Used installers")).toBeTruthy();
+    expect(screen.getAllByText(/regenerates — safe/i).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/gone forever/i).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/hint — review first/i).length).toBeGreaterThan(0);
+    // Findings explain themselves.
+    expect(screen.getByText(/npm \/ yarn \/ pnpm install/)).toBeTruthy();
+
+    // Selection starts empty; the script action is locked until it isn't.
+    expect(screen.getByText(/Nothing is ever pre-selected/)).toBeTruthy();
+    const scriptBtn = screen.getByRole("button", {
+      name: "Deletion script…",
+    }) as HTMLButtonElement;
+    expect(scriptBtn.disabled).toBe(true);
+
+    // Select-all exists ONLY on regenerable groups — never on gone-forever.
+    const selAlls = screen.getAllByText("Select all in this group");
+    expect(selAlls.length).toBe(2); // App caches + Build artifacts
+    const trashGroup = screen.getByText("Trash").closest(".reclaim-group")!;
+    expect(trashGroup.textContent).not.toContain("Select all in this group");
+
+    // Explicit per-row selection updates the running readout.
+    fireEvent.click(screen.getByLabelText("Select node_modules"));
+    fireEvent.click(screen.getByLabelText("Select target"));
+    await waitFor(() => {
+      const info = document.querySelector(".reclaim-footer-info");
+      expect(info?.textContent).toMatch(/2\s*selected — would\s*free/);
+    });
+
+    // The script modal: Trash is the default, dry-run is stated, and the
+    // permanent variant is a visible, explicit alternative.
+    expect(scriptBtn.disabled).toBe(false);
+    fireEvent.click(scriptBtn);
+    await screen.findByText("Generate deletion script");
+    expect(screen.getByText("Move to Trash")).toBeTruthy();
+    expect(screen.getByText("Delete permanently")).toBeTruthy();
+    expect(screen.getByText(/preview by default/)).toBeTruthy();
+    const copyBtn = screen.getByRole("button", {
+      name: /Copy move-to-Trash script/,
+    });
+    fireEvent.click(copyBtn);
+    await screen.findByText(/Deletion script copied/);
+  }, 30000);
+
+  test("duplicate pass: explicit start, progress, kept copy excluded", async () => {
+    render(<App />);
+    const scanBtn = await screen.findByRole("button", { name: "Scan" });
+    await waitFor(() =>
+      expect((scanBtn as HTMLButtonElement).disabled).toBe(false)
+    );
+    fireEvent.click(scanBtn);
+    await waitFor(() => screen.getByText("Scan time"), { timeout: 15000 });
+
+    fireEvent.click(screen.getByRole("tab", { name: "Reclaimable" }));
+    // Duplicates are a separate, explicitly-triggered pass.
+    const findBtn = await screen.findByRole("button", {
+      name: "Find duplicates",
+    });
+    expect(screen.getByText(/reads file contents/)).toBeTruthy();
+    fireEvent.click(findBtn);
+
+    // It reports its own progress, then verified groups.
+    await waitFor(
+      () => {
+        const name = document.querySelector(".reclaim-dup-name");
+        expect(name?.textContent).toBe("export-final.jpg");
+      },
+      { timeout: 10000 }
+    );
+    // The kept copy is visibly excluded from the number and unselectable.
+    expect(screen.getByText("kept — not counted")).toBeTruthy();
+    expect(
+      screen.queryByLabelText("Select copy /Users/you/Pictures/export-final.jpg")
+    ).toBeNull();
+    expect(
+      screen.getByLabelText("Select copy /Users/you/Documents/export-final.jpg")
+    ).toBeTruthy();
+    // Keep-one accounting is spelled out.
+    expect(screen.getByText(/one copy stays/)).toBeTruthy();
   }, 30000);
 
   test("skipped panel opens with explanations", async () => {

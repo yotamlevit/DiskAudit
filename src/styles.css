@@ -1262,6 +1262,402 @@ button {
   box-shadow: var(--shadow-2);
 }
 
+/* Reclaimable tab */
+.reclaim-root {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  user-select: text;
+  padding-bottom: 64px; /* room for the sticky footer */
+}
+.reclaim-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  border: 1px solid rgba(56, 189, 248, 0.3);
+  background: rgba(56, 189, 248, 0.06);
+  color: var(--fg-1);
+  font-size: 12px;
+}
+.reclaim-headline {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px 16px;
+}
+.reclaim-headline-num {
+  font-size: 24px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--good);
+}
+.reclaim-headline-sub {
+  color: var(--fg-2);
+  font-size: 12px;
+}
+.summary-value.reclaimable {
+  color: var(--good);
+}
+.summary-sub {
+  color: var(--fg-3);
+  font-size: 11px;
+  font-weight: 500;
+}
+.reclaim-group {
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+.reclaim-group-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.reclaim-group-head h3 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 700;
+}
+.reclaim-group-total {
+  color: var(--fg-2);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.reclaim-selall {
+  margin-left: auto;
+  font-size: 11px;
+}
+.reclaim-group-blurb {
+  margin: 6px 0 10px;
+  color: var(--fg-2);
+  font-size: 11px;
+  max-width: 720px;
+}
+.reclaim-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.badge-safe {
+  background: rgba(52, 211, 153, 0.14);
+  color: var(--good);
+  border: 1px solid rgba(52, 211, 153, 0.4);
+}
+.badge-careful {
+  background: rgba(245, 158, 11, 0.12);
+  color: var(--warn);
+  border: 1px solid rgba(245, 158, 11, 0.45);
+}
+.badge-dup {
+  background: rgba(167, 139, 250, 0.12);
+  color: #a78bfa;
+  border: 1px solid rgba(167, 139, 250, 0.45);
+}
+.badge-hint {
+  background: var(--bg-3);
+  color: var(--fg-2);
+  border: 1px solid var(--border-strong);
+}
+.badge-keep {
+  background: rgba(56, 189, 248, 0.12);
+  color: var(--accent);
+  border: 1px solid rgba(56, 189, 248, 0.4);
+  text-transform: none;
+}
+.reclaim-rows {
+  display: flex;
+  flex-direction: column;
+}
+.reclaim-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.reclaim-row:hover {
+  background: rgba(56, 189, 248, 0.06);
+}
+.reclaim-row.sel {
+  background: rgba(56, 189, 248, 0.1);
+}
+.reclaim-row input[type="checkbox"] {
+  accent-color: var(--accent);
+  flex-shrink: 0;
+}
+.reclaim-checkbox-spacer {
+  width: 13px;
+  flex-shrink: 0;
+}
+.reclaim-row-main {
+  flex: 1 1 40%;
+  min-width: 0;
+}
+.reclaim-row-name {
+  font-weight: 600;
+  color: var(--fg-0);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.reclaim-row-path {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--fg-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.reclaim-row-path.solo {
+  font-size: 11px;
+  color: var(--fg-1);
+}
+.reclaim-row-reason {
+  flex: 1 1 40%;
+  min-width: 0;
+  color: var(--fg-2);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.reclaim-mtime {
+  color: var(--fg-3);
+}
+.reclaim-row-size {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg-0);
+  white-space: nowrap;
+  min-width: 70px;
+  text-align: right;
+}
+.reclaim-more {
+  padding: 6px 8px;
+  color: var(--fg-3);
+  font-size: 11px;
+  font-style: italic;
+}
+.reclaim-empty {
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 18px;
+  color: var(--fg-2);
+  font-size: 12px;
+}
+.reclaim-empty h3 {
+  margin: 0 0 6px;
+  color: var(--fg-0);
+}
+.reclaim-empty p {
+  margin: 0 0 6px;
+  max-width: 640px;
+}
+.reclaim-dup-intro p {
+  margin: 6px 0 10px;
+  color: var(--fg-2);
+  font-size: 11px;
+  max-width: 720px;
+}
+.reclaim-dup-progress {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 4px;
+}
+.reclaim-dup-progress-text {
+  flex: 1;
+  color: var(--fg-1);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.reclaim-dupgroup {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+}
+.reclaim-dupgroup-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+.reclaim-dup-name {
+  font-weight: 700;
+}
+.reclaim-dup-meta {
+  color: var(--fg-2);
+  font-size: 11px;
+}
+/* Selection / export footer (sticky inside the scrolling tab) */
+.reclaim-footer {
+  position: fixed;
+  left: 18px;
+  right: 18px;
+  bottom: 12px;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  background: var(--bg-1);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  box-shadow: var(--shadow-2);
+}
+.reclaim-footer-info {
+  flex: 1;
+  font-size: 12px;
+  color: var(--fg-1);
+}
+.reclaim-footer-hint {
+  color: var(--fg-3);
+}
+.reclaim-footer-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.reclaim-export-wrap {
+  position: relative;
+}
+.reclaim-export-menu {
+  position: absolute;
+  bottom: 38px;
+  right: 0;
+  width: 320px;
+  background: var(--bg-1);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  box-shadow: var(--shadow-2);
+  padding: 4px;
+  z-index: 90;
+}
+/* Script modal */
+.reclaim-modal-body {
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.reclaim-mode-cards {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.reclaim-mode-card {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+  background: var(--bg-2);
+}
+.reclaim-mode-card.on {
+  border-color: var(--accent);
+  background: rgba(56, 189, 248, 0.08);
+}
+.reclaim-mode-card.danger.on {
+  border-color: var(--danger);
+  background: rgba(239, 68, 68, 0.08);
+}
+.reclaim-mode-title {
+  font-weight: 700;
+  font-size: 12px;
+}
+.reclaim-mode-card.danger .reclaim-mode-title {
+  color: var(--danger);
+}
+.reclaim-mode-sub {
+  color: var(--fg-2);
+  font-size: 11px;
+}
+.reclaim-dryrun-note {
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(52, 211, 153, 0.35);
+  background: rgba(52, 211, 153, 0.07);
+  color: var(--fg-1);
+  font-size: 11px;
+}
+.reclaim-dryrun-note code {
+  font-family: var(--font-mono);
+}
+.reclaim-rejected {
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(245, 158, 11, 0.4);
+  background: rgba(245, 158, 11, 0.07);
+  font-size: 11px;
+  color: var(--fg-1);
+}
+.reclaim-rejected ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+}
+.reclaim-script-list {
+  max-height: 160px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.reclaim-script-item {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--fg-1);
+}
+.reclaim-script-item:last-child {
+  border-bottom: none;
+}
+.reclaim-script-preview summary {
+  cursor: pointer;
+  color: var(--fg-2);
+  font-size: 11px;
+}
+.reclaim-script-preview pre {
+  max-height: 240px;
+  overflow: auto;
+  background: var(--bg-0);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.5;
+  user-select: text;
+  -webkit-user-select: text;
+}
+.reclaim-modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 14px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-2);
+}
+
 /* Empty state */
 .empty-state {
   flex: 1;

@@ -53,7 +53,7 @@ jobs:
           workspaces: src-tauri
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
       - run: npm ci
       - uses: tauri-apps/tauri-action@v0

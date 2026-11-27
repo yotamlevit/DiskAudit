@@ -62,7 +62,22 @@ fn pipeline_finds_real_duplicates_and_ignores_hardlinks() {
         d.groups.len(),
         1,
         "exactly one verified group (orig+copy); hardlinks and the \
-         middle-differing file are excluded"
+         middle-differing file are excluded (errors {}, hashed {}, read {}, store {:?})",
+        d.errors,
+        d.files_hashed,
+        d.bytes_read,
+        shared
+            .dirs
+            .iter()
+            .flat_map(|kv| {
+                kv.value()
+                    .lock()
+                    .files
+                    .iter()
+                    .map(|f| (f.name.clone(), f.size, f.logical, f.hardlinked))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
     );
     let g = &d.groups[0];
     assert_eq!(g.logical, 2_000_000);

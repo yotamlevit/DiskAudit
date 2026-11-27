@@ -21,7 +21,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 #[allow(unused_imports)] // unused where linux.rs is the active module
-pub use super::unix_meta::{dir_device, link_alloc, stat_file};
+pub use super::unix_meta::{dir_meta, link_alloc, stat_file};
 
 pub const OS: &str = "macos";
 pub const TRASH_NAME: &str = "Trash";

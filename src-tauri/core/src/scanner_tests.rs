@@ -50,6 +50,33 @@ fn alloc_of(path: &Path) -> u64 {
     m.alloc
 }
 
+/// Blocks a directory itself occupies (0 on APFS and on Windows, where the
+/// scanner does not count them; ~4 KiB on ext4).
+fn dir_alloc(_path: &Path) -> u64 {
+    #[cfg(unix)]
+    {
+        alloc_of(_path)
+    }
+    #[cfg(not(unix))]
+    {
+        0
+    }
+}
+
+/// Own blocks of every real directory in the fixture (root included),
+/// found by an independent recursive read_dir — never through a symlink,
+/// and not into `exclude` (directories the scan under test skips).
+fn tree_dir_alloc(root: &Path, exclude: &[PathBuf]) -> u64 {
+    let mut total = dir_alloc(root);
+    for entry in fs::read_dir(root).unwrap().flatten() {
+        let path = entry.path();
+        if entry.file_type().unwrap().is_dir() && !exclude.contains(&path) {
+            total += tree_dir_alloc(&path, exclude);
+        }
+    }
+    total
+}
+
 /// chmod 000 stops nobody when the tests run as root (containers).
 #[cfg(unix)]
 fn lock_dir(dir: &Path) -> bool {
@@ -94,7 +121,11 @@ fn counts_are_recursive() {
     let expected = alloc_of(&root.join("a/f1")) + alloc_of(&root.join("a/b/f2"));
     assert_eq!(t.files, 2, "recursive file count");
     assert_eq!(t.dirs, 2, "recursive dir count");
-    assert_eq!(t.size, expected, "recursive allocated size");
+    assert_eq!(
+        t.size,
+        expected + tree_dir_alloc(&root, &[]),
+        "recursive allocated size"
+    );
 
     // The view exposes recursive counts on the nested dir too.
     let view = build_view(&shared, &root, 4, 3000).unwrap();
@@ -153,7 +184,11 @@ fn symlinks_counted_never_followed() {
         + alloc_of(&root.join("sub").join("inner.dat"))
         + alloc_of(&root.join("link"))
         + alloc_of(&root.join("sublink"));
-    assert_eq!(t.size, expected, "targets counted once, links at own size");
+    assert_eq!(
+        t.size,
+        expected + tree_dir_alloc(&root, &[]),
+        "targets counted once, links at own size"
+    );
 
     // Symlinks appear in listings, flagged.
     let listing = list_dir(&shared, &root, 0, 100).unwrap();
@@ -171,7 +206,11 @@ fn hardlinks_deduplicated() {
     let shared = scan_fixture(&root);
     let t = root_totals(&shared);
     let one = alloc_of(&root.join("orig.dat"));
-    assert_eq!(t.size, one, "two links, one inode, counted once");
+    assert_eq!(
+        t.size,
+        one + tree_dir_alloc(&root, &[]),
+        "two links, one inode, counted once"
+    );
     assert_eq!(t.files, 2, "both paths still listed as files");
     assert_eq!(
         shared.counters.hardlink_saved.load(Ordering::Relaxed),
@@ -201,7 +240,11 @@ fn sparse_files_counted_at_allocated_size() {
 
     let shared = scan_fixture(&root);
     let t = root_totals(&shared);
-    assert_eq!(t.size, allocated, "allocated, not logical");
+    assert_eq!(
+        t.size,
+        allocated + tree_dir_alloc(&root, &[]),
+        "allocated, not logical"
+    );
     assert_eq!(
         shared.counters.logical_bytes.load(Ordering::Relaxed),
         md.len(),
@@ -240,7 +283,7 @@ fn skip_plumbing_marks_nodes_and_excludes_bytes() {
     // Policy that treats <root>/aliased as an alias and filters on the
     // root's real device (where the OS has one): "kept" must stay allowed.
     let policy = Arc::new(ScanPolicy::with_rules(
-        platform::dir_device(&root).into_iter().collect(),
+        platform::dir_meta(&root).dev.into_iter().collect(),
         vec![root.join("aliased")],
     ));
     let shared = Arc::new(ScanShared::new(1, root.clone()));
@@ -250,7 +293,7 @@ fn skip_plumbing_marks_nodes_and_excludes_bytes() {
     let t = root_totals(&shared);
     assert_eq!(
         t.size,
-        alloc_of(&root.join("kept").join("k.dat")),
+        alloc_of(&root.join("kept").join("k.dat")) + tree_dir_alloc(&root, &[root.join("aliased")]),
         "alias content excluded from totals"
     );
 
@@ -293,6 +336,7 @@ fn empty_directory_view_is_valid() {
     let view = build_view(&shared, &root, 4, 3000).unwrap();
     assert!(view.children.is_empty());
     assert!(!view.has_hidden_children);
-    assert_eq!(view.size, 0);
+    let own = dir_alloc(&root);
     let _ = fs::remove_dir_all(&root);
+    assert_eq!(view.size, own, "an empty directory is only its own blocks");
 }

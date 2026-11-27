@@ -56,6 +56,7 @@ fn paths_of(g: &ReclaimGroup) -> Vec<&str> {
 
 // ----- Cache / well-known detection ----------------------------------------
 
+#[cfg(target_os = "macos")]
 #[test]
 fn library_caches_children_are_flagged_per_app() {
     let shared = store("/Users/alice");
@@ -291,6 +292,7 @@ fn nested_findings_collapse_to_the_outermost() {
 
 // ----- Trash / installers / stale ------------------------------------------
 
+#[cfg(target_os = "macos")]
 #[test]
 fn trash_installers_and_stale_rules() {
     let shared = store("/Users/alice");
@@ -361,6 +363,7 @@ fn trash_installers_and_stale_rules() {
     );
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn stale_never_flags_under_library_or_unknown_mtime() {
     let shared = store("/Users/alice");

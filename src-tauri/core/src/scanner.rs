@@ -23,6 +23,9 @@
 //     shared extents; Finder counts clones the same way.
 //   * Symlinks are never followed. Each one is recorded where it stands with
 //     the link's own allocated size (usually 0) and tallied in the summary.
+//   * A directory's own blocks count toward it (0 on APFS, ~4 KiB each on
+//     ext4/XFS): they are freed with the directory, and counting them is
+//     what makes totals agree with `du` on Linux.
 //   * Skipped territory (cloud dirs, other volumes, the firmlink alias) is
 //     recorded as zero-size nodes with an explicit reason, never dropped.
 //
@@ -110,7 +113,8 @@ pub struct FileRec {
 #[derive(Default)]
 pub struct DirAcc {
     pub name: String,
-    /// Allocated bytes of direct (non-recursive) entries.
+    /// Allocated bytes of direct (non-recursive) entries, plus the blocks
+    /// the directory itself occupies (see platform::DirMeta::alloc).
     pub own_size: u64,
     pub files: Vec<FileRec>,
     pub children: Vec<PathBuf>,
@@ -129,6 +133,13 @@ impl DirAcc {
     pub(crate) fn new(name: String) -> Self {
         Self {
             name,
+            ..Default::default()
+        }
+    }
+    pub(crate) fn with_own_size(name: String, own_size: u64) -> Self {
+        Self {
+            name,
+            own_size,
             ..Default::default()
         }
     }
@@ -377,10 +388,12 @@ pub type ProgressCb = dyn Fn(u64, u64, u64, u64, String) + Send + Sync;
 /// Panic-free by construction: no unwrap/expect/indexing on runtime data.
 pub fn walk(shared: &Arc<ScanShared>, policy: Arc<ScanPolicy>, on_progress: Arc<ProgressCb>) {
     let root = shared.root.clone();
+    let root_own = platform::dir_meta(&root).alloc;
     shared
         .dirs
         .entry(root.clone())
-        .or_insert_with(|| Mutex::new(DirAcc::new(shared.root_name.clone())));
+        .or_insert_with(|| Mutex::new(DirAcc::with_own_size(shared.root_name.clone(), root_own)));
+    shared.counters.bytes.fetch_add(root_own, Ordering::Relaxed);
 
     // (volume, file id) pairs already counted, for hardlink dedup.
     let seen_inodes: Arc<DashSet<(u64, u64)>> = Arc::new(DashSet::new());
@@ -413,6 +426,10 @@ pub fn walk(shared: &Arc<ScanShared>, policy: Arc<ScanPolicy>, on_progress: Arc<
             let mut local_errors: u64 = 0;
             let mut local_symlinks: u64 = 0;
             let mut local_hl_saved: u64 = 0;
+            // Own blocks of the child directories discovered here. They are
+            // stored on each child's record, not this one's, so they only
+            // feed the live byte counter.
+            let mut local_dir_bytes: u64 = 0;
 
             for (i, entry_result) in children.iter_mut().enumerate() {
                 if i % CANCEL_CHECK_STRIDE == CANCEL_CHECK_STRIDE - 1
@@ -439,21 +456,19 @@ pub fn walk(shared: &Arc<ScanShared>, policy: Arc<ScanPolicy>, on_progress: Arc<
                             });
                         } else if ft.is_dir() {
                             let child_path = entry.path();
-                            let dev = if policy_w.wants_devices() {
-                                platform::dir_device(&child_path)
-                            } else {
-                                None
-                            };
-                            let skip = policy_w.skip_reason(&child_path, dev);
+                            let meta = platform::dir_meta(&child_path);
+                            let skip = policy_w.skip_reason(&child_path, meta.dev);
                             shared_w.dirs.entry(child_path.clone()).or_insert_with(|| {
                                 Mutex::new(match skip {
                                     Some(r) => DirAcc::skipped(fname.clone(), r),
-                                    None => DirAcc::new(fname.clone()),
+                                    None => DirAcc::with_own_size(fname.clone(), meta.alloc),
                                 })
                             });
                             if skip.is_some() {
-                                // Do not descend.
+                                // Do not descend. (Skipped dirs stay zero-size.)
                                 entry.read_children_path = None;
+                            } else {
+                                local_dir_bytes += meta.alloc;
                             }
                             local_subdirs.push(child_path);
                         } else {
@@ -515,7 +530,8 @@ pub fn walk(shared: &Arc<ScanShared>, policy: Arc<ScanPolicy>, on_progress: Arc<
             let c = &shared_w.counters;
             c.files.fetch_add(added_files, Ordering::Relaxed);
             c.dirs.fetch_add(added_dirs, Ordering::Relaxed);
-            c.bytes.fetch_add(local_size, Ordering::Relaxed);
+            c.bytes
+                .fetch_add(local_size + local_dir_bytes, Ordering::Relaxed);
             c.logical_bytes.fetch_add(local_logical, Ordering::Relaxed);
             c.symlinks.fetch_add(local_symlinks, Ordering::Relaxed);
             c.hardlink_saved

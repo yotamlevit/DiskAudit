@@ -2,7 +2,7 @@
 // detector make lives behind this module:
 //
 //   * how a file's on-disk size, hardlink identity and mtime are read
-//     (`stat_file`, `link_alloc`, `dir_device`);
+//     (`stat_file`, `link_alloc`, `dir_meta`);
 //   * which directories a scan may descend into (`ScanPolicy`): other
 //     volumes, cloud placeholders, aliases of content counted elsewhere;
 //   * how the scan root is resolved (`resolve_root`) and where "home" is;
@@ -18,7 +18,7 @@
 //
 // The two Unix modules are both COMPILED on every Unix so their pure path
 // logic is unit-tested wherever the tests run; only the active one is used.
-// Nothing outside this directory may contain `cfg(target_os)` or
+// No non-test code outside this directory may contain `cfg(target_os)` or
 // `std::os::*` — port by editing here.
 
 use serde::Serialize;
@@ -69,16 +69,29 @@ pub fn link_alloc(path: &Path) -> u64 {
     os::link_alloc(path)
 }
 
-/// Device/volume id of a directory, where the OS needs one to detect a
-/// mount boundary. `None` = unknown or not applicable (Windows: mount
-/// points are reparse points, which the walk never follows).
-pub fn dir_device(path: &Path) -> Option<u64> {
-    os::dir_device(path)
+/// What the walk needs to know about a directory before descending.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DirMeta {
+    /// Device/volume id, where the OS needs one to detect a mount boundary.
+    /// `None` = unknown or not applicable (Windows: mount points are reparse
+    /// points, which the walk never follows).
+    pub dev: Option<u64>,
+    /// Blocks the directory's own entry table occupies — freed when the
+    /// directory is deleted, and what `du` counts for it. 0 on APFS (entries
+    /// live in the volume's B-tree) and on Windows (not queried); typically
+    /// 4 KiB or more per directory on ext4, XFS and friends.
+    pub alloc: u64,
+}
+
+/// Stat a directory without following a link. Default (zeroes) on failure:
+/// the directory's own read error is reported by the walk itself.
+pub fn dir_meta(path: &Path) -> DirMeta {
+    os::dir_meta(path)
 }
 
 #[cfg(unix)]
 pub(crate) mod unix_meta {
-    use super::FileMeta;
+    use super::{DirMeta, FileMeta};
     use std::os::unix::fs::MetadataExt;
     use std::path::Path;
 
@@ -100,8 +113,14 @@ pub(crate) mod unix_meta {
             .unwrap_or(0)
     }
 
-    pub fn dir_device(path: &Path) -> Option<u64> {
-        std::fs::symlink_metadata(path).ok().map(|md| md.dev())
+    pub fn dir_meta(path: &Path) -> DirMeta {
+        match std::fs::symlink_metadata(path) {
+            Ok(md) => DirMeta {
+                dev: Some(md.dev()),
+                alloc: md.blocks() * 512,
+            },
+            Err(_) => DirMeta::default(),
+        }
     }
 
     /// Device of a path, following links (scan roots, mount points).
@@ -153,12 +172,6 @@ impl ScanPolicy {
             allowed_devs,
             alias_paths,
         }
-    }
-
-    /// Does this scan need each directory's device id at all? Lets the
-    /// walker skip a stat per directory when nothing would be done with it.
-    pub fn wants_devices(&self) -> bool {
-        !self.allowed_devs.is_empty()
     }
 
     /// Should the walk skip this child directory? `dev` is the directory's
@@ -386,14 +399,12 @@ mod tests {
         );
         // Unknown device: give the walk the benefit of the doubt.
         assert_eq!(policy.skip_reason(Path::new("/a"), None), None);
-        assert!(policy.wants_devices());
     }
 
     #[test]
     fn empty_dev_set_disables_filtering() {
         let policy = ScanPolicy::with_rules(HashSet::new(), Vec::new());
         assert_eq!(policy.skip_reason(Path::new("/a"), Some(42)), None);
-        assert!(!policy.wants_devices());
     }
 
     #[test]

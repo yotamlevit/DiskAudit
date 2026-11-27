@@ -17,7 +17,8 @@
 //     does not distinguish it).
 
 use super::{
-    match_home_site, strip_rel_suffix, FileMeta, ReclaimKind, ReclaimSite, COMMON_HOME_SITES,
+    match_home_site, strip_rel_suffix, DirMeta, FileMeta, ReclaimKind, ReclaimSite,
+    COMMON_HOME_SITES,
 };
 use std::collections::HashSet;
 use std::os::windows::fs::OpenOptionsExt;
@@ -96,9 +97,11 @@ pub fn link_alloc(_path: &Path) -> u64 {
     0
 }
 
-/// Not needed: mount points are reparse points and are never descended.
-pub fn dir_device(_path: &Path) -> Option<u64> {
-    None
+/// No device (mount points are reparse points and are never descended) and
+/// no own size: a directory's index allocation is small and not worth a
+/// handle per directory.
+pub fn dir_meta(_path: &Path) -> DirMeta {
+    DirMeta::default()
 }
 
 pub fn root_policy(_root: &Path) -> (HashSet<u64>, Vec<PathBuf>) {

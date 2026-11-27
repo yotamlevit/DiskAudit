@@ -18,10 +18,15 @@ describe("App (against mock backend)", () => {
   test("idle → scan → map renders → drill down and back", async () => {
     render(<App />);
 
-    // Idle state with the pitch.
+    // Welcome screen: the pitch, one obvious action, one-click targets and
+    // the read-only promise.
     await screen.findByText("Where did the space go?");
+    expect(screen.getByRole("button", { name: "Choose a folder…" })).toBeTruthy();
+    await screen.findByText("Home folder");
+    expect(screen.getByText("Downloads")).toBeTruthy();
+    expect(screen.getByText(/never writes, moves or deletes/)).toBeTruthy();
 
-    // Path is prefilled from home_dir; Scan becomes enabled.
+    // Path is prefilled from platform_info; Scan becomes enabled.
     const scanBtn = await screen.findByRole("button", { name: "Scan" });
     await waitFor(() =>
       expect((scanBtn as HTMLButtonElement).disabled).toBe(false)
@@ -29,14 +34,14 @@ describe("App (against mock backend)", () => {
     fireEvent.click(scanBtn);
 
     // Scanning phase streams progress.
-    await screen.findByText(/Scanning|files/);
+    expect((await screen.findAllByText(/Scanning|files/)).length).toBeGreaterThan(0);
 
     // Mock scan takes ~3s; summary bar appears when done.
-    await waitFor(() => screen.getByText("Scan time"), { timeout: 15000 });
-    expect(screen.getByText("On disk")).toBeTruthy();
+    await waitFor(() => screen.getByText(/scanned in/), { timeout: 15000 });
+    expect(screen.getByText(/on disk in/)).toBeTruthy();
 
     // Skipped territory is surfaced.
-    expect(screen.getByText("Not scanned")).toBeTruthy();
+    expect(screen.getByText(/not scanned/)).toBeTruthy();
 
     // The treemap rendered blocks; folder headers include top-level dirs.
     await waitFor(() => {
@@ -66,7 +71,7 @@ describe("App (against mock backend)", () => {
     );
 
     // Statistics tab is linked and populated.
-    fireEvent.click(screen.getByRole("tab", { name: "Statistics" }));
+    fireEvent.click(screen.getByRole("tab", { name: "File types" }));
     await screen.findByText("By category");
     await screen.findByText("Largest files");
   }, 30000);
@@ -78,7 +83,7 @@ describe("App (against mock backend)", () => {
       expect((scanBtn as HTMLButtonElement).disabled).toBe(false)
     );
     fireEvent.click(scanBtn);
-    await waitFor(() => screen.getByText("Scan time"), { timeout: 15000 });
+    await waitFor(() => screen.getByText(/scanned in/), { timeout: 15000 });
 
     // Search: type a query, get ranked results.
     const search = screen.getByPlaceholderText(/Search files and folders/);
@@ -113,31 +118,30 @@ describe("App (against mock backend)", () => {
       expect((scanBtn as HTMLButtonElement).disabled).toBe(false)
     );
     fireEvent.click(scanBtn);
-    await waitFor(() => screen.getByText("Scan time"), { timeout: 15000 });
+    await waitFor(() => screen.getByText(/scanned in/), { timeout: 15000 });
 
     // The headline metric appears in the summary bar; clicking opens the tab.
     const cell = await screen.findByTitle(
       "What could plausibly be freed (before duplicate detection)"
     );
-    expect(cell.textContent).toContain("Reclaimable");
-    expect(cell.textContent).toContain("%");
+    expect(cell.textContent).toContain("can be freed");
     fireEvent.click(cell);
-    await screen.findByText(/plausibly reclaimable/);
+    await screen.findByText(/could be freed/);
 
     // Groups arrive sorted by size with visible confidence classes.
     await screen.findByText("App caches");
     expect(screen.getByText("Build artifacts")).toBeTruthy();
     expect(screen.getByText("Used installers")).toBeTruthy();
-    expect(screen.getAllByText(/regenerates — safe/i).length).toBeGreaterThan(0);
-    expect(screen.getAllByText(/gone forever/i).length).toBeGreaterThan(0);
-    expect(screen.getAllByText(/hint — review first/i).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/Safe · comes back by itself/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/Careful · gone for good/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/Hint · review first/).length).toBeGreaterThan(0);
     // Findings explain themselves.
     expect(screen.getByText(/npm \/ yarn \/ pnpm install/)).toBeTruthy();
 
     // Selection starts empty; the script action is locked until it isn't.
     expect(screen.getByText(/Nothing is ever pre-selected/)).toBeTruthy();
     const scriptBtn = screen.getByRole("button", {
-      name: "Deletion script…",
+      name: "Create cleanup script…",
     }) as HTMLButtonElement;
     expect(scriptBtn.disabled).toBe(true);
 
@@ -159,7 +163,7 @@ describe("App (against mock backend)", () => {
     // permanent variant is a visible, explicit alternative.
     expect(scriptBtn.disabled).toBe(false);
     fireEvent.click(scriptBtn);
-    await screen.findByText("Generate deletion script");
+    await screen.findByText("Create cleanup script");
     expect(screen.getByText("Move to Trash")).toBeTruthy();
     expect(screen.getByText("Delete permanently")).toBeTruthy();
     expect(screen.getByText(/preview by default/)).toBeTruthy();
@@ -167,7 +171,7 @@ describe("App (against mock backend)", () => {
       name: /Copy move-to-Trash script/,
     });
     fireEvent.click(copyBtn);
-    await screen.findByText(/Deletion script copied/);
+    await screen.findByText(/Cleanup script copied/);
   }, 30000);
 
   test("duplicate pass: explicit start, progress, kept copy excluded", async () => {
@@ -177,9 +181,9 @@ describe("App (against mock backend)", () => {
       expect((scanBtn as HTMLButtonElement).disabled).toBe(false)
     );
     fireEvent.click(scanBtn);
-    await waitFor(() => screen.getByText("Scan time"), { timeout: 15000 });
+    await waitFor(() => screen.getByText(/scanned in/), { timeout: 15000 });
 
-    fireEvent.click(screen.getByRole("tab", { name: "Reclaimable" }));
+    fireEvent.click(screen.getByRole("tab", { name: /Free up space/ }));
     // Duplicates are a separate, explicitly-triggered pass.
     const findBtn = await screen.findByRole("button", {
       name: "Find duplicates",
@@ -214,7 +218,7 @@ describe("App (against mock backend)", () => {
       expect((scanBtn as HTMLButtonElement).disabled).toBe(false)
     );
     fireEvent.click(scanBtn);
-    await waitFor(() => screen.getByText("Not scanned"), { timeout: 15000 });
+    await waitFor(() => screen.getByText(/not scanned/), { timeout: 15000 });
 
     fireEvent.click(screen.getByTitle("What wasn't scanned, and why"));
     await screen.findByText("Cloud storage");

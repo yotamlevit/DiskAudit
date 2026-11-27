@@ -7,7 +7,14 @@ import {
 } from "d3-hierarchy";
 import type { SkipReason, ViewNode } from "./types";
 import { formatBytes, formatNumber } from "./format";
-import { categorize, CATEGORIES, categoryColor, Category } from "./categories";
+import {
+  categorize,
+  CATEGORIES,
+  categoryColor,
+  categoryInkVar,
+  categoryVar,
+  Category,
+} from "./categories";
 
 export interface Highlight {
   path: string;
@@ -205,8 +212,9 @@ export default function Treemap({
 
               const value = node.value ?? d.size;
 
-              // Structural colors come from CSS variables so light mode
-              // works; category colors are theme-independent.
+              // Every colour is a CSS variable, so both themes get their
+              // own steps (structure from styles.css, categories from
+              // categories.json).
               let fill: string;
               if (isSkipped) {
                 fill = "var(--map-skip-bg)";
@@ -221,12 +229,19 @@ export default function Treemap({
                 fill = categoryColor(d.name);
               }
 
+              // Label ink is picked per category AND theme (black or white,
+              // whichever contrasts more with that fill).
+              const leafInk =
+                isLeaf && !isAggregate && !isSkipped
+                  ? categoryInkVar(categorize(d.name))
+                  : undefined;
+
               const isHover = d.path === hoverPath;
               let stroke: string;
               let strokeWidth: number;
               let strokeDash: string | undefined;
               if (isHover) {
-                stroke = "#7dd3fc";
+                stroke = "var(--map-hover)";
                 strokeWidth = 2;
                 strokeDash = undefined;
               } else if (isAggregate) {
@@ -242,8 +257,11 @@ export default function Treemap({
                 strokeWidth = 1;
                 strokeDash = undefined;
               } else {
-                stroke = "rgba(0,0,0,0.45)";
-                strokeWidth = 0.5;
+                // A hairline of the surface colour between neighbours, not
+                // an outline: same-coloured blocks stay countable without
+                // adding ink.
+                stroke = "var(--map-gap)";
+                strokeWidth = 1;
                 strokeDash = undefined;
               }
 
@@ -357,6 +375,7 @@ export default function Treemap({
                         className={
                           isAggregate ? "aggregate-label" : "leaf-label-name"
                         }
+                        style={leafInk ? { fill: leafInk } : undefined}
                         pointerEvents="none"
                       >
                         {truncate(d.name, Math.floor(w / 6))}
@@ -368,6 +387,7 @@ export default function Treemap({
                           className={
                             isAggregate ? "aggregate-label-size" : "leaf-label-size"
                           }
+                          style={leafInk ? { fill: leafInk } : undefined}
                           pointerEvents="none"
                         >
                           {formatBytes(value)}
@@ -396,7 +416,7 @@ export default function Treemap({
             <div className="legend-item" key={k} title={CATEGORIES[k].label}>
               <span
                 className="legend-swatch"
-                style={{ background: CATEGORIES[k].color }}
+                style={{ background: categoryVar(k) }}
               />
               <span className="legend-label">{CATEGORIES[k].label}</span>
             </div>

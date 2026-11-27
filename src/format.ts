@@ -1,18 +1,35 @@
-// Sizes are formatted the way macOS does: DECIMAL units (1 KB = 1000 bytes),
-// so DiskAudit's numbers line up with Finder and Get Info. (The app measures
-// allocated blocks, so totals can still differ from Finder's logical sizes —
-// see README — but the unit convention matches.)
+// Byte sizes follow the HOST's convention so DiskAudit's numbers line up
+// with the file manager next to it:
+//   * macOS and Linux desktops: DECIMAL units (1 KB = 1000 bytes), as Finder
+//     and GNOME Files show them;
+//   * Windows: 1024-based units under the KB/MB/GB labels, as File Explorer
+//     shows them.
+// (The app measures allocated blocks, so totals can still differ from a file
+// manager's logical sizes — see README — but the unit convention matches.)
+let unitBase: 1000 | 1024 = 1000;
+
+/** Set once at startup from the host OS (see App.tsx). */
+export function setByteUnits(os: "macos" | "windows" | "linux"): void {
+  unitBase = os === "windows" ? 1024 : 1000;
+}
+
 export function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes < 0) return "0 B";
-  if (bytes < 1000) return `${Math.round(bytes)} B`;
+  if (bytes < unitBase) return `${Math.round(bytes)} B`;
   const units = ["KB", "MB", "GB", "TB", "PB"];
-  let v = bytes / 1000;
+  let v = bytes / unitBase;
   let i = 0;
-  while (v >= 1000 && i < units.length - 1) {
-    v /= 1000;
+  while (v >= unitBase && i < units.length - 1) {
+    v /= unitBase;
     i++;
   }
-  const decimals = v >= 100 ? 0 : v >= 10 ? 1 : 2;
+  // Rounding can carry a value up to the next unit ("1000 KB" → "1.00 MB").
+  let decimals = v >= 100 ? 0 : v >= 10 ? 1 : 2;
+  if (Number(v.toFixed(decimals)) >= unitBase && i < units.length - 1) {
+    v /= unitBase;
+    i++;
+    decimals = 2;
+  }
   return `${v.toFixed(decimals)} ${units[i]}`;
 }
 

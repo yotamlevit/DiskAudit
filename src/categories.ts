@@ -8,12 +8,72 @@ export type Category = keyof typeof defs;
 
 interface CategoryDef {
   label: string;
+  /** Fill on the light surface. */
   color: string;
+  /** The same hue stepped for the dark surface. */
+  colorDark: string;
 }
 
+// Eight hues in a fixed order plus two neutrals. The order is the palette's
+// validated slot order (adjacent pairs stay distinguishable under colour-
+// vision deficiency); a ninth hue would not be, so new file kinds join an
+// existing category instead of getting a colour of their own.
 export const CATEGORIES = Object.fromEntries(
-  Object.entries(defs).map(([k, v]) => [k, { label: v.label, color: v.color }])
+  Object.entries(defs).map(([k, v]) => [
+    k,
+    { label: v.label, color: v.color, colorDark: v.colorDark },
+  ])
 ) as Record<Category, CategoryDef>;
+
+/** CSS colour for a category: a custom property that resolves to the light
+ * or dark step with the theme. Use this for anything painted on screen. */
+export function categoryVar(cat: Category): string {
+  return `var(--cat-${cat})`;
+}
+
+/** Text colour to print on top of a category fill. */
+export function categoryInkVar(cat: Category): string {
+  return `var(--cat-${cat}-ink)`;
+}
+
+/** WCAG relative luminance of a #rrggbb colour. */
+function luminance(hex: string): number {
+  const lin = (i: number) => {
+    const c = parseInt(hex.slice(i, i + 2), 16) / 255;
+    return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+  };
+  return 0.2126 * lin(1) + 0.7152 * lin(3) + 0.0722 * lin(5);
+}
+
+/** Near-black or white, whichever has the higher contrast ratio on `hex`. */
+export function inkOn(hex: string): string {
+  const l = luminance(hex);
+  const onWhite = 1.05 / (l + 0.05);
+  const onBlack = (l + 0.05) / 0.068; // #111827 has luminance ~0.018
+  return onWhite >= onBlack ? "#ffffff" : "#111827";
+}
+
+/** The stylesheet that defines those custom properties, generated from the
+ * JSON so the table stays the single source of truth. */
+export function categoryStyleSheet(): string {
+  const entries = Object.entries(CATEGORIES) as [Category, CategoryDef][];
+  const vars = (pick: (v: CategoryDef) => string) =>
+    entries
+      .map(([k, v]) => `--cat-${k}:${pick(v)};--cat-${k}-ink:${inkOn(pick(v))};`)
+      .join("");
+  const light = vars((v) => v.color);
+  const dark = vars((v) => v.colorDark);
+  return `:root{${light}}@media (prefers-color-scheme: dark){:root{${dark}}}`;
+}
+
+/** Install the category colours once at startup (see main.tsx). */
+export function installCategoryColors(doc: Document = document): void {
+  if (doc.getElementById("category-colors")) return;
+  const style = doc.createElement("style");
+  style.id = "category-colors";
+  style.textContent = categoryStyleSheet();
+  doc.head.appendChild(style);
+}
 
 const EXT_TO_CATEGORY: Record<string, Category> = {};
 for (const [cat, def] of Object.entries(defs)) {
@@ -37,11 +97,11 @@ export function categorize(name: string): Category {
 }
 
 export function categoryColor(name: string): string {
-  return CATEGORIES[categorize(name)].color;
+  return categoryVar(categorize(name));
 }
 
 export function colorForExt(ext: string): string {
-  return CATEGORIES[categoryForExt(ext)].color;
+  return categoryVar(categoryForExt(ext));
 }
 
 export function categoryForExt(ext: string): Category {

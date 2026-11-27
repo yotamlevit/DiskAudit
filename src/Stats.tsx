@@ -1,6 +1,12 @@
 import type { ScanDone } from "./types";
 import { formatBytes, formatNumber } from "./format";
-import { CATEGORIES, colorForExt, isCategory, categorize } from "./categories";
+import {
+  CATEGORIES,
+  categoryColor,
+  categoryVar,
+  colorForExt,
+  isCategory,
+} from "./categories";
 
 interface StatsProps {
   summary: ScanDone;
@@ -34,7 +40,7 @@ export default function Stats({
           {stats.by_category.map(({ category, count, size }) => {
             const pct = (size / total) * 100;
             const def = isCategory(category)
-              ? CATEGORIES[category]
+              ? { label: CATEGORIES[category].label, color: categoryVar(category) }
               : { label: category, color: "var(--fg-3)" };
             return (
               <div
@@ -181,8 +187,7 @@ export default function Stats({
                       <span
                         className="cat-bar-swatch"
                         style={{
-                          background:
-                            CATEGORIES[categorize(f.name)].color,
+                          background: categoryColor(f.name),
                         }}
                       />
                     </td>

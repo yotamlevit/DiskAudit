@@ -174,9 +174,11 @@ pub fn looks_like_home(base: &Path) -> bool {
 }
 
 const HOME_SITES: &[(&str, ReclaimSite)] = &[
+    // %TEMP% itself must keep existing (programs assume it does), so its
+    // CONTENTS are the findings: one per leftover folder.
     (
         "AppData/Local/Temp",
-        ReclaimSite::SelfIsFinding(ReclaimKind::TempFiles),
+        ReclaimSite::ChildrenAreFindings(ReclaimKind::TempFiles),
     ),
     (
         "AppData/Local/CrashDumps",
@@ -227,9 +229,15 @@ const HOME_SITES: &[(&str, ReclaimSite)] = &[
 
 /// Windows-directory-relative spots (visible on a drive scan; clearing them
 /// needs administrator rights).
-const WINDOWS_DIR_SITES: &[(&str, ReclaimKind)] = &[
-    ("Temp", ReclaimKind::TempFiles),
-    ("SoftwareDistribution/Download", ReclaimKind::PackageCache),
+const WINDOWS_DIR_SITES: &[(&str, ReclaimSite)] = &[
+    (
+        "Temp",
+        ReclaimSite::ChildrenAreFindings(ReclaimKind::TempFiles),
+    ),
+    (
+        "SoftwareDistribution/Download",
+        ReclaimSite::SelfIsFinding(ReclaimKind::PackageCache),
+    ),
 ];
 
 pub fn reclaim_site(path: &Path, root: &Path) -> Option<ReclaimSite> {
@@ -240,12 +248,12 @@ pub fn reclaim_site(path: &Path, root: &Path) -> Option<ReclaimSite> {
     {
         return Some(ReclaimSite::SelfIsFinding(ReclaimKind::Trash));
     }
-    for (rel, kind) in WINDOWS_DIR_SITES {
+    for (rel, site) in WINDOWS_DIR_SITES {
         if let Some(windir) = strip_rel_suffix(path, rel, true) {
             if windir.file_name().is_some_and(|n| eq_ci(n, "Windows"))
                 && windir.parent().is_some_and(is_volume_root)
             {
-                return Some(ReclaimSite::SelfIsFinding(*kind));
+                return Some(*site);
             }
         }
     }
@@ -324,7 +332,7 @@ mod tests {
         let root = Path::new(r"C:\Users\alice");
         assert_eq!(
             reclaim_site(Path::new(r"C:\Users\alice\AppData\Local\Temp"), root),
-            Some(ReclaimSite::SelfIsFinding(ReclaimKind::TempFiles))
+            Some(ReclaimSite::ChildrenAreFindings(ReclaimKind::TempFiles))
         );
         assert_eq!(
             reclaim_site(Path::new(r"C:\Users\alice\appdata\local\npm-cache"), root),
@@ -360,7 +368,7 @@ mod tests {
         );
         assert_eq!(
             reclaim_site(Path::new(r"C:\Windows\Temp"), drive),
-            Some(ReclaimSite::SelfIsFinding(ReclaimKind::TempFiles))
+            Some(ReclaimSite::ChildrenAreFindings(ReclaimKind::TempFiles))
         );
         assert_eq!(
             reclaim_site(

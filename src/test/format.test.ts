@@ -1,5 +1,9 @@
 import { describe, expect, test } from "vitest";
-import { formatBytes, formatDuration, formatNumber } from "../format";
+import { afterEach } from "vitest";
+import { formatBytes, formatDuration, formatNumber, setByteUnits } from "../format";
+
+// Units are a module-level setting; every test leaves it at the default.
+afterEach(() => setByteUnits("macos"));
 
 describe("formatBytes (decimal units, matching Finder)", () => {
   test("bytes below 1000 stay in B", () => {
@@ -28,6 +32,29 @@ describe("formatBytes (decimal units, matching Finder)", () => {
     expect(formatBytes(-5)).toBe("0 B");
     expect(formatBytes(NaN)).toBe("0 B");
     expect(formatBytes(Infinity)).toBe("0 B");
+  });
+});
+
+describe("formatBytes follows the host's convention", () => {
+  test("Windows: 1024-based under the same labels, as File Explorer shows", () => {
+    setByteUnits("windows");
+    expect(formatBytes(1000)).toBe("1000 B");
+    expect(formatBytes(1024)).toBe("1.00 KB");
+    expect(formatBytes(1_073_741_824)).toBe("1.00 GB");
+    expect(formatBytes(100_000_000_000)).toBe("93.1 GB");
+  });
+
+  test("Linux and macOS stay decimal", () => {
+    setByteUnits("linux");
+    expect(formatBytes(100_000_000_000)).toBe("100 GB");
+    setByteUnits("macos");
+    expect(formatBytes(100_000_000_000)).toBe("100 GB");
+  });
+
+  test("rounding never prints a four-digit value in the smaller unit", () => {
+    expect(formatBytes(999_999)).toBe("1.00 MB");
+    setByteUnits("windows");
+    expect(formatBytes(1024 * 1024 - 1)).toBe("1.00 MB");
   });
 });
 

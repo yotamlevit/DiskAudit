@@ -21,11 +21,13 @@ import type {
   ReclaimProgress,
   ReclaimReport,
   ScanDone,
+  PlatformInfo,
   ViewNode,
   ViewPayload,
 } from "./types";
-import { formatBytes, formatDuration, formatNumber } from "./format";
-import { Crumb, jumpTo, parentPath, pushCrumb, trailTo } from "./nav";
+import { formatBytes, formatDuration, formatNumber, setByteUnits } from "./format";
+import { Crumb, jumpTo, parentPath, pushCrumb, samePath, trailTo } from "./nav";
+import { describePlatform, guessPlatform, Platform, PlatformContext } from "./platform";
 import { loadRecents, saveRecent, RecentScan } from "./recents";
 import type { Category } from "./categories";
 
@@ -59,7 +61,8 @@ export default function App() {
   const [searchReq, setSearchReq] = useState<SearchRequest | null>(null);
   const [recents, setRecents] = useState<RecentScan[]>(() => loadRecents());
   const [fdaDismissed, setFdaDismissed] = useState(false);
-  const [home, setHome] = useState<string>("");
+  const [platform, setPlatform] = useState<Platform>(() => guessPlatform());
+  const home = platform.home;
   const [reclaim, setReclaim] = useState<ReclaimReport | null>(null);
   const [dupProgress, setDupProgress] = useState<ReclaimProgress | null>(null);
   const [dupActive, setDupActive] = useState(false);
@@ -83,14 +86,16 @@ export default function App() {
   const navDirRef = useRef<"down" | "up" | "jump">("jump");
   const viewCache = useRef<Map<string, ViewPayload>>(new Map());
 
-  // Resolve home dir as the default path once on mount. (Keyed on nothing:
-  // clearing the input must NOT repopulate it.) Also kept for the deletion
-  // script's protected-path checks.
+  // Ask the backend which OS this is and where home is, once on mount: it
+  // drives wording, shortcuts, unit convention and the script dialect, and
+  // home is the default scan path. (Keyed on nothing: clearing the input
+  // must NOT repopulate it.)
   useEffect(() => {
-    invoke<string>("home_dir")
-      .then((h) => {
-        setPath((p) => p || h);
-        setHome(h);
+    invoke<PlatformInfo>("platform_info")
+      .then((info) => {
+        setByteUnits(info.os);
+        setPlatform(describePlatform(info));
+        setPath((p) => p || info.home);
       })
       .catch(() => {});
   }, []);
@@ -384,10 +389,10 @@ export default function App() {
             setToast({ msg: "Path copied.", ts: Date.now() });
             break;
           case "copy-delete":
-            await copyText(deleteCommand(target.path, target.isDir));
+            await copyText(deleteCommand(target.path, target.isDir, platform.os));
             setToast({
               msg:
-                "Delete command copied. Paste it in Terminal to run it — " +
+                `Delete command copied. Paste it in ${platform.terminal} to run it — ` +
                 "DiskAudit itself never deletes anything.",
               danger: true,
               ts: Date.now(),
@@ -398,7 +403,7 @@ export default function App() {
         setToast({ msg: String(e), danger: true, ts: Date.now() });
       }
     },
-    [navigateToPath]
+    [navigateToPath, platform]
   );
 
   // Keyboard: ⌘O browse, ⌘R rescan, Esc/Backspace/⌘↑ go up. (⌘F is handled
@@ -433,7 +438,7 @@ export default function App() {
       if (
         e.key === "Escape" ||
         e.key === "Backspace" ||
-        (cmd && e.key === "ArrowUp")
+        ((cmd || e.altKey) && e.key === "ArrowUp")
       ) {
         e.preventDefault();
         goUpOne();
@@ -455,7 +460,7 @@ export default function App() {
     return () => unsubs.forEach((u) => u());
   }, []);
 
-  // Drop a folder from Finder anywhere on the window to scan it.
+  // Drop a folder from the file manager anywhere on the window to scan it.
   // (Dropping a file scans its enclosing folder — the backend resolves it.)
   const [dragOver, setDragOver] = useState(false);
   useEffect(() => {
@@ -488,14 +493,19 @@ export default function App() {
     !fdaDismissed &&
     (summary?.permission_errors ?? 0) > 0;
 
+
+  const rescanSame = phase === "done" && !!summary && samePath(summary.root_path, path);
+  const unreadable = summary?.permission_errors ?? 0;
+
   return (
-    <div className="app-root">
+    <PlatformContext.Provider value={platform}>
+    <div className="app-root" data-os={platform.os}>
       <header className="app-header">
         <div className="brand">
           <div className="brand-mark" aria-hidden="true" />
           <div className="brand-text">
             <div className="brand-name">DiskAudit</div>
-            <div className="brand-tag">Read-only disk usage explorer</div>
+            <div className="brand-tag">See what fills your disk</div>
           </div>
         </div>
         <div className="path-controls">
@@ -504,7 +514,7 @@ export default function App() {
             value={path}
             spellCheck={false}
             onChange={(e) => setPath(e.target.value)}
-            placeholder="/Users/you  or  /  for the whole startup disk"
+            placeholder={platform.pathPlaceholder}
             aria-label="Folder to scan"
             onKeyDown={(e) => {
               if (e.key === "Enter" && phase !== "scanning") startScan();
@@ -514,9 +524,9 @@ export default function App() {
             className="btn btn-ghost"
             onClick={browse}
             disabled={phase === "scanning"}
-            title="Choose a folder (⌘O)"
+            title={`Choose a folder (${platform.mod("O")})`}
           >
-            Browse…
+            Choose folder…
           </button>
           {phase === "scanning" ? (
             <button
@@ -531,11 +541,9 @@ export default function App() {
               className="btn btn-primary"
               onClick={startScan}
               disabled={!path}
-              title={phase === "done" ? "Rescan (⌘R)" : "Scan (⏎)"}
+              title={rescanSame ? `Rescan (${platform.mod("R")})` : "Scan (Enter)"}
             >
-              {phase === "done" && summary?.root_path === path
-                ? "Rescan"
-                : "Scan"}
+              {rescanSame ? "Rescan" : "Scan"}
             </button>
           )}
         </div>
@@ -569,12 +577,8 @@ export default function App() {
       {phase === "error" && (
         <div className="error-banner" role="alert">
           <strong>Scan failed:</strong> {errorMsg}
-          {errorMsg.toLowerCase().includes("permission") && (
-            <div className="error-hint">
-              macOS may require granting <strong>Full Disk Access</strong> to
-              DiskAudit in System Settings → Privacy &amp; Security to scan
-              protected locations.
-            </div>
+          {/permission|denied|not permitted/i.test(errorMsg) && (
+            <div className="error-hint">{platform.unreadableHelp}</div>
           )}
         </div>
       )}
@@ -592,35 +596,19 @@ export default function App() {
           {summary.root_note}
         </div>
       )}
-      {showFdaHint && (
-        <div className="notice-banner" role="status">
-          {formatNumber(summary!.permission_errors)} item
-          {summary!.permission_errors === 1 ? "" : "s"} couldn't be read —
-          usually macOS privacy protection. Grant DiskAudit{" "}
-          <strong>Full Disk Access</strong>, then rescan.{" "}
-          <button
-            className="link-btn"
-            onClick={() => openFdaSettings().catch(() => {})}
-          >
-            Open settings
-          </button>{" "}
-          <button className="link-btn" onClick={() => setFdaDismissed(true)}>
-            Dismiss
-          </button>
-        </div>
-      )}
-
       {phase === "done" && summary && (
         <div className="summary-bar">
-          <div className="summary-cell">
-            <span className="summary-label">On disk</span>
-            <span className="summary-value">
+          <div className="summary-main">
+            <span className="summary-total">
               {formatBytes(summary.allocated_bytes)}
             </span>
+            <span className="summary-total-label">
+              on disk in <span className="mono">{summary.root_name}</span>
+            </span>
           </div>
-          {reclaim && (
+          {reclaim && reclaim.total > 0 && (
             <button
-              className="summary-cell summary-clickable"
+              className="summary-chip chip-good"
               onClick={() => setTab("reclaim")}
               title={
                 reclaim.dup.status === "done"
@@ -628,64 +616,65 @@ export default function App() {
                   : "What could plausibly be freed (before duplicate detection)"
               }
             >
-              <span className="summary-label">Reclaimable</span>
-              <span className="summary-value reclaimable">
-                ≈ {formatBytes(reclaim.total)}
-                {summary.allocated_bytes > 0 && (
-                  <span className="summary-sub">
-                    {" "}
-                    {(
-                      (reclaim.total / summary.allocated_bytes) *
-                      100
-                    ).toFixed(0)}
-                    %
-                  </span>
-                )}{" "}
-                <span className="summary-more">›</span>
-              </span>
+              ≈ {formatBytes(reclaim.total)} can be freed
+              <span className="summary-more" aria-hidden="true">›</span>
             </button>
           )}
-          <div className="summary-cell">
-            <span className="summary-label">Files</span>
-            <span className="summary-value">
-              {formatNumber(summary.total_files)}
+          <div className="summary-meta">
+            <span>
+              <strong>{formatNumber(summary.total_files)}</strong> files
             </span>
-          </div>
-          <div className="summary-cell">
-            <span className="summary-label">Folders</span>
-            <span className="summary-value">
-              {formatNumber(summary.total_dirs)}
+            <span>
+              <strong>{formatNumber(summary.total_dirs)}</strong> folders
             </span>
-          </div>
-          <div className="summary-cell">
-            <span className="summary-label">Unreadable</span>
-            <span
-              className={`summary-value ${
-                summary.permission_errors > 0 ? "warn" : ""
-              }`}
-            >
-              {formatNumber(summary.permission_errors)}
+            <span title="How long the scan took">
+              scanned in {formatDuration(summary.elapsed_ms)}
             </span>
+            {unreadable > 0 && (
+              <button
+                className="summary-chip chip-warn"
+                onClick={() => setFdaDismissed(false)}
+                title="Some items could not be read, so they are not counted"
+              >
+                {formatNumber(unreadable)} unreadable
+              </button>
+            )}
+            {summary.skipped_total > 0 && (
+              <button
+                className="summary-chip"
+                onClick={() => setShowSkipped(true)}
+                title="What wasn't scanned, and why"
+              >
+                {formatNumber(summary.skipped_total)} not scanned
+                <span className="summary-more" aria-hidden="true">›</span>
+              </button>
+            )}
           </div>
-          {summary.skipped_total > 0 && (
-            <button
-              className="summary-cell summary-clickable"
-              onClick={() => setShowSkipped(true)}
-              title="What wasn't scanned, and why"
-            >
-              <span className="summary-label">Not scanned</span>
-              <span className="summary-value">
-                {formatNumber(summary.skipped_total)}{" "}
-                <span className="summary-more">›</span>
-              </span>
+        </div>
+      )}
+      {showFdaHint && (
+        <div className="notice-banner" role="status">
+          <span>
+            <strong>
+              {formatNumber(unreadable)} item{unreadable === 1 ? "" : "s"}{" "}
+              couldn't be read
+            </strong>{" "}
+            and {unreadable === 1 ? "is" : "are"} missing from the totals.{" "}
+            {platform.unreadableHelp}
+          </span>
+          <span className="notice-actions">
+            {platform.hasPrivacySettings && (
+              <button
+                className="link-btn"
+                onClick={() => openFdaSettings().catch(() => {})}
+              >
+                Open settings
+              </button>
+            )}
+            <button className="link-btn" onClick={() => setFdaDismissed(true)}>
+              Dismiss
             </button>
-          )}
-          <div className="summary-cell">
-            <span className="summary-label">Scan time</span>
-            <span className="summary-value">
-              {formatDuration(summary.elapsed_ms)}
-            </span>
-          </div>
+          </span>
         </div>
       )}
 
@@ -709,7 +698,7 @@ export default function App() {
                 disabled={!summary}
                 title={summary ? undefined : "Available when the scan finishes"}
               >
-                Statistics
+                File types
               </button>
               <button
                 className={`view-tab ${tab === "reclaim" ? "active" : ""}`}
@@ -718,7 +707,10 @@ export default function App() {
                 aria-selected={tab === "reclaim"}
                 title="What could plausibly be freed, and why"
               >
-                Reclaimable
+                Free up space
+                {reclaim && reclaim.total > 0 && phase === "done" && (
+                  <span className="tab-badge">{formatBytes(reclaim.total)}</span>
+                )}
               </button>
             </div>
             <SearchBar
@@ -735,7 +727,7 @@ export default function App() {
                   <button
                     className="crumb back"
                     onClick={goUpOne}
-                    title="Go up one level (Esc, ⌘↑ or Backspace)"
+                    title={`Go up one level (${platform.upKeys})`}
                     aria-label="Go up one level"
                   >
                     ←
@@ -795,6 +787,7 @@ export default function App() {
                 dupActive={dupActive}
                 dupProgress={dupProgress}
                 home={home}
+                os={platform.os}
                 onStartDup={startDup}
                 onCancelDup={cancelDup}
                 onNavigate={navigateToPath}
@@ -816,38 +809,62 @@ export default function App() {
       )}
 
       {phase === "idle" && (
-        <div className="empty-state">
-          <h2>Where did the space go?</h2>
-          <p>
-            Pick a folder and scan it. Every file becomes a block sized by the
-            space it occupies on disk — click the big ones to see what they
-            are. DiskAudit never writes, moves, or deletes anything.
-          </p>
-          <ul className="empty-tips">
-            <li>Drop any folder from Finder onto this window to scan it.</li>
-            <li>Click a folder block to look inside it.</li>
-            <li>Go back up with the ← button, breadcrumbs, Esc or ⌘↑.</li>
-            <li>When the scan finishes, search with ⌘F.</li>
-          </ul>
+        <div className="welcome">
+          <div className="welcome-card">
+            <h1>Where did the space go?</h1>
+            <p className="welcome-lede">
+              Scan a folder and see everything in it as a map, sized by the
+              space it takes on disk. The biggest blocks are your answer.
+            </p>
+            <div className="welcome-actions">
+              <button className="btn btn-primary btn-lg" onClick={browse}>
+                Choose a folder…
+              </button>
+              <span className="welcome-or">or drop a folder anywhere on this window</span>
+            </div>
+            <div className="quick-picks" aria-label="Quick scan targets">
+              {platform.quickPicks.map((q) => (
+                <button
+                  key={q.path}
+                  className="quick-pick"
+                  title={q.hint}
+                  onClick={() => {
+                    setPath(q.path);
+                    startScanRef.current(q.path);
+                  }}
+                >
+                  <span className="quick-pick-label">{q.label}</span>
+                  <span className="quick-pick-path">{q.hint}</span>
+                </button>
+              ))}
+            </div>
+            <p className="welcome-safe">
+              <span className="welcome-safe-mark" aria-hidden="true" />
+              DiskAudit only looks. It never writes, moves or deletes
+              anything — cleaning up is always something you do yourself.
+            </p>
+          </div>
           {recents.length > 0 && (
             <div className="recents">
               <div className="recents-title">Recent scans</div>
-              {recents.map((r) => (
-                <button
-                  key={r.path}
-                  className="recent-chip"
-                  title={`Scan ${r.path} again`}
-                  onClick={() => {
-                    setPath(r.path);
-                    startScanRef.current(r.path);
-                  }}
-                >
-                  <span className="recent-path">{r.path}</span>
-                  {r.bytes !== undefined && (
-                    <span className="recent-size">{formatBytes(r.bytes)}</span>
-                  )}
-                </button>
-              ))}
+              <div className="recents-list">
+                {recents.map((r) => (
+                  <button
+                    key={r.path}
+                    className="recent-chip"
+                    title={`Scan ${r.path} again`}
+                    onClick={() => {
+                      setPath(r.path);
+                      startScanRef.current(r.path);
+                    }}
+                  >
+                    <span className="recent-path">{r.path}</span>
+                    {r.bytes !== undefined && (
+                      <span className="recent-size">{formatBytes(r.bytes)}</span>
+                    )}
+                  </button>
+                ))}
+              </div>
             </div>
           )}
         </div>
@@ -889,5 +906,6 @@ export default function App() {
         </div>
       )}
     </div>
+    </PlatformContext.Provider>
   );
 }

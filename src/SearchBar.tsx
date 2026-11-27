@@ -4,6 +4,7 @@ import type { SearchHit } from "./types";
 import { formatBytes } from "./format";
 import { CATEGORIES, Category, categoryColor } from "./categories";
 import { parentPath } from "./nav";
+import { usePlatform } from "./platform";
 
 /** External trigger (e.g. clicking a stats row) that opens the search with
  * filters preset. */
@@ -39,6 +40,7 @@ export default function SearchBar({
   onNavigate,
   onContext,
 }: SearchBarProps) {
+  const platform = usePlatform();
   const [open, setOpen] = useState(false);
   const [text, setText] = useState("");
   const [ext, setExt] = useState("");
@@ -135,7 +137,7 @@ export default function SearchBar({
         ref={inputRef}
         className="search-input"
         type="search"
-        placeholder="Search files and folders…  (⌘F)"
+        placeholder={`Search files and folders…  (${platform.mod("F")})`}
         aria-label="Search scanned files and folders"
         value={text}
         onFocus={() => setOpen(true)}

@@ -18,7 +18,7 @@
     "exts": ["ts", "tsx", "js", "jsx", "mjs", "cjs", "py", "rs", "go", "c", "cpp", "cc", "cxx", "h", "hpp", "java", "swift", "kt", "rb", "php", "sh", "bash", "zsh", "lua", "scala", "clj", "ex", "erl", "elm", "dart", "vue", "svelte", "txt", "md", "json", "xml", "yml", "yaml", "csv", "tsv", "html", "htm", "css", "scss", "less", "toml", "ini", "conf", "log", "plist"]
   },
   "archive": {
-    "label": "Archives & disk images",
+    "label": "Archives",
     "color": "#f2a600",
     "colorDark": "#d28e05",
     "exts": ["zip", "tar", "gz", "bz2", "xz", "7z", "rar", "tgz", "zst", "pkg", "xip", "jar", "asar", "ipsw", "br", "lz4", "dmg", "iso", "img", "qcow2", "vmdk", "vdi", "vhd", "vhdx", "sparseimage", "sparsebundle", "deb", "rpm", "msi", "msix", "appx", "cab", "appimage", "snap", "flatpak"]

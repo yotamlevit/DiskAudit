@@ -5,10 +5,16 @@ on:
     branches: [main]
   pull_request:
 
+# DiskAudit ships for macOS, Windows and Linux, so every job that can differ
+# by OS runs on all three.
 jobs:
-  rust:
-    name: Rust (check, clippy, fmt, tests)
-    runs-on: macos-latest
+  core:
+    name: Core (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
     defaults:
       run:
         working-directory: src-tauri
@@ -21,17 +27,33 @@ jobs:
         with:
           workspaces: src-tauri
       - name: cargo fmt --check
-        run: cargo fmt --check
-      - name: cargo check
-        run: cargo check --all-targets
-      - name: cargo clippy
-        run: cargo clippy --all-targets -- -D warnings
-      - name: cargo test
-        run: cargo test
+        run: cargo fmt --all --check
+      # The scanner crate has no UI dependency: it builds and is tested on a
+      # bare runner, against the real filesystem of each OS.
+      - name: cargo clippy (core)
+        run: cargo clippy -p diskaudit-core --all-targets -- -D warnings
+      - name: cargo test (core)
+        run: cargo test -p diskaudit-core
+      - name: Totals agree with du
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          cargo run --release -q -p diskaudit-core --example scan_summary -- core/src > scan.txt
+          cat scan.txt
+          ours=$(sed -n 's/.*du -sk equiv: \([0-9]*\) KB.*/\1/p' scan.txt)
+          theirs=$(du -sk core/src | cut -f1)
+          echo "scanner: ${ours} KB, du: ${theirs} KB"
+          test "$ours" = "$theirs"
 
   frontend:
-    name: Frontend (tsc, vitest)
-    runs-on: macos-latest
+    name: Frontend (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Windows is here for the PowerShell script tests: they execute the
+        # generated script with pwsh against real NTFS junctions.
+        os: [macos-latest, ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -44,3 +66,38 @@ jobs:
         run: npx tsc -b --force
       - name: Tests
         run: npm test
+
+  app:
+    name: App build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-22.04, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: npm ci
+        run: npm ci
+      - name: Build frontend
+        run: npm run build
+      - name: cargo clippy (workspace)
+        working-directory: src-tauri
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      # Compiles and links the whole app for this OS (no installer).
+      - name: tauri build --debug --no-bundle
+        run: npm run tauri build -- --debug --no-bundle

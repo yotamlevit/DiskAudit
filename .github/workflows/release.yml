@@ -55,7 +55,8 @@ jobs:
         with:
           node-version: 24
           cache: npm
-      - run: npm ci
+      # Pinned npm: see the note in ci.yml.
+      - run: npx -y npm@11.6.2 ci
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

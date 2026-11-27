@@ -10,7 +10,14 @@ use std::sync::Arc;
 const NOW: i64 = 1_700_000_000;
 
 fn tmp_root(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("diskaudit-reclaim-{}-{}", std::process::id(), name));
+    // Next to the test binary, NOT in the OS temp dir: on Windows %TEMP% is
+    // itself a reclaim site, so a fixture inside it becomes one "leftover
+    // temp folder" finding that outranks everything the test put there.
+    let base = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(Path::to_path_buf))
+        .unwrap_or_else(std::env::temp_dir);
+    let d = base.join(format!("diskaudit-reclaim-{}-{}", std::process::id(), name));
     let _ = fs::remove_dir_all(&d);
     fs::create_dir_all(&d).unwrap();
     crate::platform::resolve_root(&d)
@@ -62,22 +69,7 @@ fn pipeline_finds_real_duplicates_and_ignores_hardlinks() {
         d.groups.len(),
         1,
         "exactly one verified group (orig+copy); hardlinks and the \
-         middle-differing file are excluded (errors {}, hashed {}, read {}, store {:?})",
-        d.errors,
-        d.files_hashed,
-        d.bytes_read,
-        shared
-            .dirs
-            .iter()
-            .flat_map(|kv| {
-                kv.value()
-                    .lock()
-                    .files
-                    .iter()
-                    .map(|f| (f.name.clone(), f.size, f.logical, f.hardlinked))
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>()
+         middle-differing file are excluded"
     );
     let g = &d.groups[0];
     assert_eq!(g.logical, 2_000_000);

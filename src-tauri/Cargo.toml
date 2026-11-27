@@ -1,9 +1,12 @@
 [package]
 name = "diskaudit"
-version = "1.1.0"
+version = "1.2.0"
 description = "Read-only disk usage visualizer"
 edition = "2021"
-rust-version = "1.77"
+rust-version = "1.80"
+
+[workspace]
+members = ["core"]
 
 [lib]
 name = "diskaudit_lib"
@@ -18,12 +21,8 @@ tauri-plugin-dialog = "2.0"
 tokio = { version = "1", features = ["macros", "time", "rt"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-jwalk = "0.8"
-dashmap = "6.1"
 parking_lot = "0.12"
-# Duplicate-detection pass only: content hashing (read-only) + parallel I/O.
-blake3 = "1"
-rayon = "1"
+diskaudit-core = { path = "core" }
 tauri-plugin-opener = "2"
 tauri-plugin-clipboard-manager = "2"
 tauri-plugin-window-state = "2"

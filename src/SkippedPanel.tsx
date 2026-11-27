@@ -10,14 +10,14 @@ interface SkippedPanelProps {
 const REASON_INFO: Record<SkipReason, { label: string; why: string }> = {
   cloud_storage: {
     label: "Cloud storage",
-    why: "Synced by iCloud/Dropbox/etc. Much of it may live only in the cloud, and reading it can trigger downloads or hang on the network — so it isn't scanned.",
+    why: "Synced by a cloud service (iCloud, Dropbox, OneDrive…). Much of it may live only in the cloud, and reading it can trigger downloads or hang on the network — so it isn't scanned.",
   },
   other_volume: {
     label: "Different volume",
-    why: "Lives on another disk or mount (external drive, network share, disk image). Its bytes don't occupy space on the scanned disk.",
+    why: "Lives on another disk or filesystem (external drive, network share, separate partition, virtual filesystem). Its bytes don't occupy space on the scanned one — scan it directly to look inside.",
   },
   firmlink_alias: {
-    label: "Data volume alias",
+    label: "Counted elsewhere",
     why: "macOS shows the Data volume's content at its usual places (/Users, /Applications, …). This mount point is skipped so nothing is counted twice.",
   },
 };

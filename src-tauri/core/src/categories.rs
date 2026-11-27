@@ -19,7 +19,7 @@ struct CategoryDef {
 fn ext_map() -> &'static HashMap<String, String> {
     static MAP: OnceLock<HashMap<String, String>> = OnceLock::new();
     MAP.get_or_init(|| {
-        let raw = include_str!("../../src/categories.json");
+        let raw = include_str!("../../../src/categories.json");
         let parsed: HashMap<String, CategoryDef> = serde_json::from_str(raw).unwrap_or_default();
         let mut map = HashMap::new();
         for (cat, def) in parsed {

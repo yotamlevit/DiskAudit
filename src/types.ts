@@ -1,7 +1,16 @@
-// Hand-maintained mirror of the Rust serde payloads in src-tauri/src/scanner.rs
-// and src-tauri/src/lib.rs. Field names cross the IPC boundary as snake_case
+// Hand-maintained mirror of the Rust serde payloads in src-tauri/core/src
+// (scanner.rs, reclaim.rs, platform/mod.rs) and src-tauri/src/lib.rs. Field names cross the IPC boundary as snake_case
 // (no serde rename). If you change a #[derive(Serialize)] struct there, update
 // this file in the same change — nothing checks it automatically.
+
+export type OsId = "macos" | "windows" | "linux";
+
+/** platform::PlatformInfo — host facts the UI adapts its wording to. */
+export interface PlatformInfo {
+  os: OsId;
+  /** Home directory, or "" if the OS did not report one. */
+  home: string;
+}
 
 export type SkipReason = "cloud_storage" | "other_volume" | "firmlink_alias";
 
@@ -131,7 +140,7 @@ export interface ProgressPayload {
   current: string;
 }
 
-// ----- Reclaimable-space payloads (src-tauri/src/reclaim.rs) ---------------
+// ----- Reclaimable-space payloads (src-tauri/core/src/reclaim.rs) ----------
 
 /** Why a finding is reclaimable — determines how safe acting on it is. */
 export type ReclaimClass = "regenerable" | "disposable" | "duplicate" | "stale";
@@ -140,6 +149,8 @@ export type ReclaimConfidence = "safe" | "careful" | "hint";
 export type ReclaimGroupKind =
   | "app_cache"
   | "tool_cache"
+  | "package_cache"
+  | "temp_files"
   | "xcode"
   | "build_artifact"
   | "trash"

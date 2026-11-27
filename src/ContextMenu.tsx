@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { usePlatform } from "./platform";
 
 /** Anything the context menu can act on. */
 export interface MenuTarget {
@@ -22,7 +23,7 @@ interface ContextMenuProps {
 const MENU_W = 260;
 
 /** Right-click menu for files and folders. The delete action ONLY copies a
- * command for Terminal — the app itself can't delete anything. */
+ * command for the user's own shell — the app itself can't delete anything. */
 export default function ContextMenu({
   x,
   y,
@@ -31,6 +32,7 @@ export default function ContextMenu({
   onAction,
   onClose,
 }: ContextMenuProps) {
+  const platform = usePlatform();
   const ref = useRef<HTMLDivElement>(null);
   const [height, setHeight] = useState(200);
 
@@ -85,7 +87,7 @@ export default function ContextMenu({
         </button>
       )}
       <button className="ctx-item" role="menuitem" onClick={() => act("reveal")}>
-        Reveal in Finder
+        {platform.revealLabel}
       </button>
       <button
         className="ctx-item"
@@ -102,8 +104,8 @@ export default function ContextMenu({
       >
         Copy Delete Command
         <span className="ctx-subtext">
-          Copies an <code>rm</code> command for Terminal. DiskAudit itself
-          never deletes anything.
+          Copies a command to paste into {platform.terminal}. DiskAudit
+          itself never deletes anything.
         </span>
       </button>
     </div>

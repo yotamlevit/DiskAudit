@@ -1,8 +1,10 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Main-window capability. Grants, each with its justification: dialog:allow-open — the folder picker (open only, no save dialogs). opener:allow-reveal-item-in-dir — 'Reveal in Finder' on a scanned item; selects the file in Finder via NSWorkspace, mutates nothing. opener:allow-open-url — scoped to the x-apple.systempreferences: scheme only, to open the Full Disk Access pane when a scan hits permission walls; no web URLs can be opened. clipboard-manager:allow-write-text — 'Copy path' / 'Copy delete command' put text ON the clipboard; read access is deliberately not granted. No filesystem read/write access is granted through Tauri APIs at all: filesystem READS happen only inside the app's own Rust commands, and nothing in the app can write, move, delete, or execute anything.",
-  "windows": ["main"],
+  "description": "Main-window capability, identical on macOS, Windows and Linux. Grants, each with its justification: dialog:allow-open \u2014 the folder picker (open only, no save dialogs). opener:allow-reveal-item-in-dir \u2014 'Reveal in Finder' / 'Show in File Explorer' / 'Show in File Manager' on a scanned item; asks the OS file manager to select the item, mutates nothing. opener:allow-open-url \u2014 scoped to the x-apple.systempreferences: scheme only, used on macOS to open the Full Disk Access pane when a scan hits permission walls; no web URLs can be opened, and on Windows and Linux the UI never calls it. clipboard-manager:allow-write-text \u2014 'Copy path', 'Copy delete command', findings exports and generated cleanup scripts put text ON the clipboard; read access is deliberately not granted. No filesystem read/write access is granted through Tauri APIs at all: filesystem READS happen only inside the app's own Rust commands, and nothing in the app can write, move, delete, or execute anything.",
+  "windows": [
+    "main"
+  ],
   "permissions": [
     "core:default",
     "core:window:default",
@@ -11,7 +13,11 @@
     "opener:allow-reveal-item-in-dir",
     {
       "identifier": "opener:allow-open-url",
-      "allow": [{ "url": "x-apple.systempreferences:*" }]
+      "allow": [
+        {
+          "url": "x-apple.systempreferences:*"
+        }
+      ]
     },
     "clipboard-manager:allow-write-text"
   ]

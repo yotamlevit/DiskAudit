@@ -1,39 +1,57 @@
 # DiskAudit
 
-**A read-only disk usage visualizer for macOS.** Point it at a folder — or your
-whole startup disk — and see every file as a block sized by the space it
-actually occupies. Find the big thing, understand what it is, and act on it.
+**See what fills your disk — on macOS, Windows and Linux.** Point DiskAudit at
+a folder or a whole drive and every file becomes a block sized by the space
+it actually occupies. Find the big thing, understand what it is, and decide
+what to do about it. DiskAudit itself never changes anything.
 
 ![Treemap view](docs/screenshots/treemap.png)
 
 DiskAudit is built around one loop:
 
-1. **Find** — the treemap starts filling in seconds into a scan and keeps
-   refining live. The biggest blocks are the answer to "where did my space go?"
-2. **Understand** — click to drill in, hover for exact sizes and paths, search
-   (⌘F) for things like *every video over 1 GB*, browse category and extension
-   statistics, open the full listing behind any "N smaller items" block.
-3. **Act** — right-click any file or folder: **Reveal in Finder**, **Copy
-   Path**, or **Copy Delete Command** (puts an `rm` command on the clipboard
-   for *you* to paste into Terminal — see the guarantee below). Or just drop
-   a folder from Finder onto the window to scan it.
-4. **Reclaim** — the **Reclaimable** tab answers the question the map leaves
+1. **Find** — the map starts filling in seconds into a scan and keeps
+   refining live. The biggest blocks are the answer to "where did my space
+   go?"
+2. **Understand** — click to drill in, hover for exact sizes and paths,
+   search for things like *every video over 1 GB*, browse the **File types**
+   breakdown, open the full listing behind any "N smaller items" block.
+3. **Act** — right-click any file or folder: show it in Finder / File
+   Explorer / your file manager, **Copy Path**, or **Copy Delete Command**
+   (puts a command on the clipboard for *you* to paste into Terminal or
+   PowerShell — see the guarantee below). Or drop a folder onto the window
+   to scan it.
+4. **Free up space** — the tab that answers the question the map leaves
    hanging: *which of these bytes don't I need?* Caches, build artifacts,
-   Trash, old installers, verified duplicate files and stale-file hints,
-   each labeled with **why** it's reclaimable and how safe acting on it is —
-   plus reviewable exports and a deliberately careful deletion-script
-   generator (see below).
+   the trash, old installers, verified duplicate files and stale-file hints,
+   each labeled with **why** it can go and how safe that is — plus
+   reviewable exports and a deliberately careful cleanup-script generator.
 
-| Search anything by size and kind | Complete statistics |
+| Start here | What can be freed, and why |
 | --- | --- |
-| ![Search](docs/screenshots/search.png) | ![Statistics](docs/screenshots/stats.png) |
+| ![Welcome](docs/screenshots/welcome.png) | ![Free up space](docs/screenshots/reclaim.png) |
 
-| Every "smaller items" block opens a full listing | Light mode |
+| File types | Light mode |
 | --- | --- |
-| ![Listing](docs/screenshots/listing.png) | ![Light mode](docs/screenshots/treemap-light.png) |
+| ![File types](docs/screenshots/stats.png) | ![Light mode](docs/screenshots/treemap-light.png) |
 
 *(Screenshots show the built-in demo dataset rendered by the development
 mock — run a scan to see your own disk.)*
+
+## Platform support
+
+| | macOS 11+ | Windows 10/11 | Linux (x64, GTK/WebKit) |
+| --- | --- | --- | --- |
+| Size on disk | `st_blocks` | NTFS allocation size (sees compression, sparse files, OneDrive placeholders) | `st_blocks` (matches `du` exactly) |
+| Hardlinks counted once | yes | yes (volume serial + file index) | yes |
+| Stays on one volume | APFS System+Data shown merged; other volumes skipped | junctions, symlinks and mount points are never followed | other filesystems skipped (incl. `/proc`, `/sys`, separate `/home`, btrfs subvolumes) |
+| Units | decimal, like Finder | 1024-based, like File Explorer | decimal, like GNOME Files |
+| Known cleanup spots | `~/Library/Caches`, Xcode, Trash, iOS backups | `%TEMP%`, browser and tool caches, Recycle Bin, Windows Update downloads | `~/.cache`, Flatpak caches, Trash, apt/dnf/pacman caches |
+| Cleanup script | bash, moves to `~/.Trash` | PowerShell, moves to the Recycle Bin | bash, `gio trash` |
+| Tested by | unit tests + `du` comparison on the developer machine and in CI | unit tests in CI; **not yet exercised by hand on a real Windows machine** | unit tests + `du` comparison in a container and in CI; **GUI not yet exercised by hand** |
+
+The scanner, its store and the cleanup detector live in a UI-free Rust crate
+(`src-tauri/core`); everything OS-specific sits behind
+`src-tauri/core/src/platform/`, one module per OS.
 
 ## The read-only guarantee
 
@@ -43,32 +61,38 @@ enforced in three layers:
 - The Rust scanner uses only read APIs (`metadata`, `read_dir`, directory
   traversal; duplicate detection additionally opens files **read-only** to
   hash their contents). There is no code path that opens a file for writing,
-  removes anything, or spawns a process. An audited security comment at the
-  top of `src-tauri/src/lib.rs` documents the allowed API surface.
+  removes anything, or spawns a process. On Windows the scanner additionally
+  opens a metadata-only handle per file (no read or write access) to learn
+  its size on disk. An audited security comment at the top of
+  `src-tauri/src/lib.rs` documents the allowed API surface.
 - The UI layer (Tauri) is granted **no filesystem capability at all** — just
-  the folder-open dialog, "reveal in Finder", and *write-only* clipboard
+  the folder-open dialog, "show in the file manager", and *write-only* clipboard
   access. Each grant is justified in `src-tauri/capabilities/default.json`.
 - Everything the app produces to act on — the single "Copy Delete Command",
-  the Reclaimable tab's exports, and its generated deletion scripts — is
+  the Free up space tab's exports, and its generated cleanup scripts — is
   **plain text placed on the clipboard**. DiskAudit never saves any of it to
   disk (no export files, no temp files) and has no code path that executes a
   script or shell command. Deleting remains a deliberate act you perform
-  yourself in Terminal.
+  yourself in Terminal or PowerShell.
 
-## Reclaimable space
+## Free up space
 
-The Reclaimable tab lists space you could plausibly free, **grouped by the
+The **Free up space** tab lists space you could plausibly free, **grouped by the
 reason it's reclaimable** — because the reason determines how safe acting on
 it is:
 
-- **Regenerates automatically (safe).** App caches (`~/Library/Caches/*`),
-  developer tool caches (npm, cargo, Go, Gradle, `~/.cache/*`), Xcode
+- **Comes back by itself (safe).** App caches (`~/Library/Caches/*` on
+  macOS, `~/.cache/*` and Flatpak caches on Linux, browser caches on
+  Windows), developer tool caches (npm, cargo, Go, Gradle, pip, NuGet),
+  system package caches (apt/dnf/pacman downloads, Windows Update
+  downloads — shown, but left to the system's own cleanup tool), Xcode
   DerivedData / device support / simulator caches, and build artifacts
   (`node_modules`, Rust `target`, `Pods`, `.venv`, `__pycache__`, `.next`,
   Go/PHP `vendor`). Deleting these costs rebuild/re-download time, not data.
-- **Genuinely disposable, but gone forever (careful).** Trash contents,
-  installers (`.dmg`/`.pkg`/`.xip`/`.ipsw`) sitting in Downloads for 30+
-  days, Xcode archives, and iOS device backups (the last two are here — not
+- **Genuinely disposable, but gone for good (careful).** Trash / Recycle Bin
+  contents, leftover folders in Windows temp directories, installers
+  (`.dmg`/`.pkg`, `.msi`/`.iso`, `.deb`/`.rpm`…) sitting in Downloads for
+  30+ days, Xcode archives, and iOS device backups (the last two are here — not
   under "safe" — because they do *not* regenerate).
 - **Duplicates (careful).** Files with byte-identical content at several
   paths, verified by hashing in a separate, explicitly-started, cancellable
@@ -78,9 +102,10 @@ it is:
   copy** — the kept copy is marked and never counted. Hardlinks are excluded
   outright (deleting one path frees nothing).
 - **Stale (a hint, not a verdict).** Files over 500 MB not modified in over a
-  year — judged by **modification time**, because macOS mounts are typically
-  `noatime` and access times lie. Never flagged inside `~/Library` or
-  package-like folders (`.app`, `.photoslibrary`, …).
+  year — judged by **modification time**, because access times are
+  unreliable on every OS. Never flagged in app-managed or system territory
+  (`~/Library`, `AppData`, `Program Files`, dot-directories, `/usr`…) or
+  inside package-like folders (`.app`, `.photoslibrary`, …).
 
 Detection is **deliberately conservative**: ambiguous names need
 corroborating markers (`target` only counts with a sibling `Cargo.toml`,
@@ -99,103 +124,135 @@ export carries provenance: scan root, timestamp, total, DiskAudit version.
 (nothing is ever pre-selected), and are the most carefully engineered text
 the app produces:
 
-- **Move-to-Trash by default** (recoverable); permanent `rm -rf` is an
-  explicit, clearly-labeled alternative.
+- **Move to the Trash / Recycle Bin by default** (recoverable); permanent
+  delete is an explicit, clearly-labeled alternative. On Windows, if an item
+  is too large for the Recycle Bin, Windows asks before deleting it.
+- **bash on macOS and Linux, PowerShell on Windows.** The PowerShell script
+  is plain ASCII (non-ASCII file names are spelled as character codes), so
+  it means the same thing however it is saved, and it never follows a
+  junction or symlink while deleting.
 - **Dry-run by default**: the script previews and exits unless run with
   `--yes`.
-- `set -euo pipefail`; every path shell-quoted; a review comment (size,
+- Strict mode; every path quoted for its shell; a review comment (size,
   category, why) above every entry; a provenance header.
 - Every step re-checks the path still exists, skips and reports anything
   missing, never lets one failure abort the rest, and prints a `du`-measured
   running total to reconcile against DiskAudit's estimate.
-- The generator **refuses** dangerous paths — `/`, your home, `~/Library`
-  and other protected locations, anything outside the scan root, nested
-  selections — and lists what it refused instead of emitting it.
+- The generator **refuses** dangerous paths — the filesystem or drive root,
+  your home, `~/Library` / `AppData` / `Windows` and other protected
+  locations, the Recycle Bin itself, system package caches, anything outside
+  the scan root, nested selections — and lists what it refused instead of
+  emitting it.
 
 And to repeat the guarantee: script and exports are **clipboard text**. The
 app never writes them to disk and can never run them.
 
 ## Install / build
 
-Prerequisites: [Rust](https://rustup.rs), Node 20+, Xcode command-line tools.
+Tagged releases build installers for all three platforms (`.dmg`, `.msi` /
+`.exe`, `.deb` / `.rpm` / `.AppImage`) through
+`.github/workflows/release.yml`. They are **unsigned** unless signing secrets
+are configured, so macOS Gatekeeper and Windows SmartScreen will warn on
+first launch.
+
+To build from source you need [Rust](https://rustup.rs), Node 20+, and the
+platform's Tauri prerequisites (Xcode command-line tools on macOS; the
+WebView2 runtime and MSVC build tools on Windows; `libwebkit2gtk-4.1-dev`,
+`librsvg2-dev` and friends on Linux — see
+[tauri.app/start/prerequisites](https://tauri.app/start/prerequisites/)).
 
 ```bash
 npm install
 npm run tauri dev     # run in development
-npm run tauri build   # produce DiskAudit.app and a .dmg
+npm run tauri build   # produce the installers for the OS you are on
 ```
 
-The bundles land in `src-tauri/target/release/bundle/` (`macos/DiskAudit.app`,
-`dmg/DiskAudit_*.dmg`). Drag the app to `/Applications`.
+Bundles land in `src-tauri/target/release/bundle/`.
 
-## Full Disk Access
+## When items can't be read
 
-macOS privacy protection blocks *every* app from reading Mail, Messages,
-Safari data, Time Machine metadata, and parts of `~/Library` until you grant
-**Full Disk Access** (System Settings → Privacy & Security → Full Disk
-Access). Without it, scans still work but report those places as unreadable —
-DiskAudit counts them, shows you how many items it couldn't read, and offers a
-button that opens the right settings pane. Grant access and rescan for a
-complete picture.
+A scan never fails because of a locked folder: it counts what it couldn't
+read, shows the number next to the totals, and tells you what to do.
 
-## How DiskAudit measures — and how that relates to Finder
+- **macOS** blocks every app from Mail, Messages, Safari data and parts of
+  `~/Library` until you grant **Full Disk Access** (System Settings →
+  Privacy & Security). DiskAudit offers a button that opens that pane.
+- **Windows** protects other users' profiles and system folders; run
+  DiskAudit as administrator to include them.
+- **Linux**: folders owned by root or other users are reported as unreadable.
 
-- **Sizes are allocated bytes** (`st_blocks × 512`): the space a file really
-  occupies on disk, which is what you get back by deleting it. Finder's Get
-  Info headline number is the *logical* size (what the file claims to
-  contain); DiskAudit reports the logical total in the statistics view for
-  comparison. Sparse files (Docker images, VM disks, some databases) can be
+## How DiskAudit measures — and how that relates to your file manager
+
+- **Sizes are allocated bytes**: the space a file really occupies on disk,
+  which is what you get back by deleting it. File managers usually headline
+  the *logical* size (what the file claims to contain); DiskAudit reports
+  the logical total in the File types view for comparison. Sparse files
+  (Docker images, VM disks), compressed files and cloud placeholders can be
   dramatically smaller on disk than their logical size — DiskAudit shows the
   truth.
-- **Units are decimal** (1 MB = 1,000,000 bytes), matching Finder and every
-  other macOS surface.
+- **Units follow the host**: decimal (1 MB = 1,000,000 bytes) on macOS and
+  Linux, 1024-based on Windows, so numbers line up with the file manager
+  next to the app.
 - **Hardlinks are counted once.** Extra links to the same file show as 0 bytes
-  and the deduplicated total is reported in the statistics.
+  and the deduplicated total is reported in the File types view.
+- **Directories count their own blocks** where the filesystem gives them any
+  (ext4, XFS: about 4 KiB each; APFS and NTFS: none counted). This is what
+  makes Linux totals equal `du`.
 - **APFS clones are not deduplicated** — macOS provides no public API to
   detect shared extents. Two clones of a 10 GB file count as 20 GB (Finder
-  does the same); actual disk usage may be lower.
-- **Scanning `/` shows the startup disk the way Finder presents it**: the
-  System and Data volumes merged at their usual paths. The Data volume's
+  does the same); actual disk usage may be lower. The same is true of
+  reflinks on btrfs and XFS.
+- **Scanning `/` on macOS shows the startup disk the way Finder presents it**:
+  the System and Data volumes merged at their usual paths. The Data volume's
   mount point (`/System/Volumes/Data`) is skipped so nothing is counted
-  twice, and helper volumes (Preboot, VM/swap) are listed as skipped.
+  twice.
 
 ## What a scan deliberately skips
 
 Nothing disappears silently — every skipped location appears in the map, in
-listings, and in the **Not scanned** panel with its reason:
+listings, and in the **not scanned** panel with its reason:
 
-- **Cloud-sync folders** (`~/Library/CloudStorage`, `~/Library/Mobile
-  Documents` — iCloud Drive, Dropbox, Google Drive, OneDrive): much of their
-  content lives only in the cloud, and reading them can hang on network I/O
-  or trigger downloads. Scan one directly (point DiskAudit at it) if you
-  really want it measured.
-- **Other volumes**: external drives, network shares, mounted disk images,
-  and simulator volumes don't occupy space on the disk you're scanning. Scan
-  a volume directly to measure it.
-- **Symlinks are never followed** (each is counted where it stands, at the
-  link's own ~0 size), so nothing is counted twice and scans can't loop.
+- **Cloud-sync mounts on macOS** (`~/Library/CloudStorage`, `~/Library/Mobile
+  Documents`): much of their content lives only in the cloud, and reading
+  them can hang on network I/O. (On Windows, OneDrive folders *are* scanned:
+  online-only files simply occupy 0 bytes, and reading metadata never
+  downloads anything.)
+- **Other volumes and filesystems**: external drives, network shares, disk
+  images, and on Linux anything mounted separately. Scan one directly to
+  measure it.
+- **Links are never followed** — symlinks everywhere, junctions and mount
+  points on Windows. Each is counted where it stands, at the link's own ~0
+  size, so nothing is counted twice and scans can't loop.
 
 ## Known limitations
 
-- Directory entries themselves (the few KB a huge folder's catalog occupies)
-  are not counted, only files. `du` agrees with DiskAudit on APFS to within
-  rounding.
-- "Purgeable" space that macOS reclaims on demand (local Time Machine
-  snapshots, cached iCloud content) is invisible to any user-space walk —
-  if Finder's free space disagrees with everyone, snapshots are usually why.
+- **Windows and Linux are new in 1.2.** The scanner is tested on both in CI,
+  and on Linux its totals are checked against `du`; the Windows size and
+  hardlink code paths and the PowerShell "move to Recycle Bin" action have
+  not yet been confirmed by hand on real machines. Treat the first Windows
+  numbers as something to sanity-check against a folder's Properties dialog.
+- On Windows every file costs one extra metadata handle to learn its
+  allocation size, so scans are slower than tools that read the NTFS master
+  file table directly (which needs administrator rights; DiskAudit does not).
+- Space that the OS reclaims on demand (APFS local snapshots, purgeable
+  iCloud content, Windows restore points and shadow copies) is invisible to
+  any user-space walk.
 - Which of several hardlinked paths displays the shared size depends on scan
   order.
 - The scanner keeps the whole scan in memory to serve drill-in, listing, and
   search queries instantly afterward; very large scans (millions of files)
   cost a few hundred MB of RAM.
-- **APFS clones are indistinguishable from real copies** in user space, so
-  duplicate detection may list clones — deleting one frees (almost) nothing.
-  Treat duplicate findings inside photo libraries and the like with care.
-- Reclaimable detection is deliberately conservative and **under-reports**:
-  Docker's data is never flagged (its VM image mixes caches with your
-  volumes), bare `build`/`dist` folders are never flagged, simulator devices
-  aren't (only their caches), and small findings are dropped below a floor.
-  An empty tab means nothing matched the rules, not that nothing could go.
+- **Clones and reflinks are indistinguishable from real copies** in user
+  space, so duplicate detection may list them — deleting one frees (almost)
+  nothing. Treat duplicate findings inside photo libraries with care.
+- Cleanup detection is deliberately conservative and **under-reports**:
+  Docker's data is never flagged, bare `build`/`dist` folders are never
+  flagged, `.exe` and `.AppImage` files are never called installers, and
+  small findings are dropped below a floor. An empty tab means nothing
+  matched the rules, not that nothing could go.
+- Map colours distinguish eight kinds of file. With more kinds than that no
+  palette stays readable for colour-blind users, so kinds are grouped, and
+  every block also carries a label, a tooltip and a row in the listings.
 
 ## Development
 
@@ -203,12 +260,16 @@ listings, and in the **Not scanned** panel with its reason:
 npx tsc -b --force            # type-check the frontend
 npm test                      # frontend tests (vitest)
 npm run dev                   # UI in a plain browser against a mock backend
+                              #   add ?os=windows or ?os=linux to preview those
 cd src-tauri
-cargo test                    # scanner unit tests
-cargo run --release --example scan_summary -- ~/Library   # CLI harness, compares to du
+cargo test --workspace        # scanner + reclaim tests
+cargo run --release -p diskaudit-core --example scan_summary -- ~/Library
+                              # CLI harness, compares to du
 ```
 
-CI runs `cargo fmt --check`, `cargo check`, `clippy -D warnings`, `cargo
-test`, `tsc`, and the vitest suites on every push.
+CI runs on macOS, Windows and Linux: `cargo fmt --check`, `clippy -D
+warnings` and tests for the core crate, a `du` comparison, `tsc` and vitest
+(including executing the generated bash and PowerShell scripts), and a full
+app build.
 
 Architecture notes live in [CLAUDE.md](CLAUDE.md).

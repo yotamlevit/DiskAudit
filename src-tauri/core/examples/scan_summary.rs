@@ -6,7 +6,7 @@
 // --reclaim appends the reclaimable-space report; --dups also runs the
 // duplicate pass (reads file contents — still strictly read-only).
 
-use diskaudit_lib::devtool;
+use diskaudit_core::devtool;
 
 fn main() {
     let mut show_reclaim = false;

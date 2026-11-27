@@ -23,13 +23,14 @@ interface Ipc {
   invoke: InvokeFn;
   listen: ListenFn;
   openDialog: OpenDialogFn;
-  /** Open the enclosing folder in Finder with the item selected. */
+  /** Open the enclosing folder in the file manager with the item selected. */
   revealItem: (path: string) => Promise<void>;
   /** Put text on the clipboard (write-only; the app never reads it). */
   copyText: (text: string) => Promise<void>;
-  /** Deep-link to System Settings → Privacy & Security → Full Disk Access. */
+  /** macOS only: deep-link to System Settings → Privacy & Security → Full
+   * Disk Access. (The capability allows no other URL.) */
   openFdaSettings: () => Promise<void>;
-  /** Native drag-and-drop of Finder items onto the window. */
+  /** Native drag-and-drop of files and folders onto the window. */
   onDragDrop: (handlers: {
     onDrop: (paths: string[]) => void;
     onEnter?: () => void;

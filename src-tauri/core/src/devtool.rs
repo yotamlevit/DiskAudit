@@ -17,9 +17,7 @@ pub fn scan_and_print(path: &str) {
 /// (and, on request, the duplicate pass — reads file contents, still
 /// read-only).
 pub fn scan_and_report(path: &str, show_reclaim: bool, run_dups: bool) {
-    let root = PathBuf::from(path)
-        .canonicalize()
-        .unwrap_or_else(|_| PathBuf::from(path));
+    let root = crate::platform::resolve_root(&PathBuf::from(path));
     let shared = Arc::new(scanner::ScanShared::new(1, root.clone()));
     let policy = Arc::new(ScanPolicy::for_root(&root));
 

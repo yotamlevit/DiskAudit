@@ -20,7 +20,9 @@ import {
   formatNumber,
 } from "./format";
 import { copyText } from "./ipc";
-import { parentPath } from "./nav";
+import { baseName, parentPath } from "./nav";
+import { usePlatform } from "./platform";
+import type { OsId } from "./types";
 import {
   deletionScript,
   exportCsv,
@@ -39,6 +41,8 @@ interface ReclaimProps {
   dupActive: boolean;
   dupProgress: ReclaimProgress | null;
   home: string;
+  /** Host OS: picks the script dialect and the protected locations. */
+  os: OsId;
   onStartDup: () => void;
   onCancelDup: () => void;
   /** Jump the treemap to a directory (optionally highlighting a child). */
@@ -54,10 +58,10 @@ interface ReclaimProps {
 /** Badge per reason-class: a cache and a stale personal file must not look
  * alike at a glance. */
 const CLASS_BADGE: Record<string, { label: string; cls: string }> = {
-  regenerable: { label: "regenerates — safe", cls: "badge-safe" },
-  disposable: { label: "gone forever", cls: "badge-careful" },
-  duplicate: { label: "keep one copy", cls: "badge-dup" },
-  stale: { label: "hint — review first", cls: "badge-hint" },
+  regenerable: { label: "Safe · comes back by itself", cls: "badge-safe" },
+  disposable: { label: "Careful · gone for good", cls: "badge-careful" },
+  duplicate: { label: "Careful · one copy is kept", cls: "badge-dup" },
+  stale: { label: "Hint · review first", cls: "badge-hint" },
 };
 
 const DUP_PHASE_LABEL: Record<string, string> = {
@@ -97,6 +101,7 @@ export default function Reclaim({
   dupActive,
   dupProgress,
   home,
+  os,
   onStartDup,
   onCancelDup,
   onNavigate,
@@ -172,6 +177,7 @@ export default function Reclaim({
       generatedAt: new Date().toISOString(),
       appVersion: APP_VERSION,
       home,
+      os,
     };
     const text =
       kind === "csv"
@@ -317,7 +323,7 @@ export default function Reclaim({
               onClick={() => rowNavigate(c.path, false)}
               onContextMenu={(ev) => {
                 ev.preventDefault();
-                const name = c.path.split("/").pop() ?? c.path;
+                const name = baseName(c.path);
                 onContext(
                   { path: c.path, name, isDir: false },
                   ev.clientX,
@@ -382,11 +388,12 @@ export default function Reclaim({
             {formatBytes(report.total)}
           </div>
           <div className="reclaim-headline-sub">
-            plausibly reclaimable
+            could be freed
             {dup.status === "not_started" && !scanning
-              ? " — before duplicate detection"
+              ? ", before looking for duplicates"
               : ""}
-            . Deduplicated: nothing here is counted twice.
+            . Nothing here is counted twice, and nothing is deleted until
+            you do it yourself.
           </div>
         </div>
         <button
@@ -404,7 +411,7 @@ export default function Reclaim({
           <h3>Nothing obviously reclaimable.</h3>
           <p>
             DiskAudit only flags what it can identify with high confidence —
-            known caches, build artifacts it can verify, Trash, old
+            known caches, build artifacts it can verify, the trash, old
             installers, verified duplicates. A quiet result means nothing
             matched those deliberately conservative rules, not that nothing
             here could ever be freed.
@@ -419,7 +426,9 @@ export default function Reclaim({
 
       <section className="reclaim-group">
         <div className="reclaim-group-head">
-          <span className="reclaim-badge badge-dup">keep one copy</span>
+          <span className="reclaim-badge badge-dup">
+            {CLASS_BADGE.duplicate.label}
+          </span>
           <h3>Duplicates</h3>
           {dup.status === "done" && (
             <span className="reclaim-group-total">
@@ -435,9 +444,10 @@ export default function Reclaim({
               Files with identical content at several paths. Finding them is a
               separate pass that <strong>reads file contents</strong> (still
               strictly read-only) — it can take a while on large scans, and
-              you can cancel it at any time. Hardlinks are excluded; APFS
-              clones can't be told apart from real copies, so treat photo
-              libraries and the like with care.
+              you can cancel it at any time. Hardlinks are excluded.
+              {os === "macos"
+                ? " APFS clones can't be told apart from real copies, so treat photo libraries and the like with care."
+                : ""}
             </p>
             <button
               className="btn btn-primary"
@@ -535,8 +545,8 @@ export default function Reclaim({
             </>
           ) : (
             <span className="reclaim-footer-hint">
-              Select findings to export them or build a deletion script.
-              Nothing is ever pre-selected.
+              Tick the things you want gone, then create a cleanup script to
+              run yourself. Nothing is ever pre-selected.
             </span>
           )}
         </div>
@@ -572,7 +582,7 @@ export default function Reclaim({
             )}
           </div>
           <button
-            className="btn btn-danger"
+            className="btn btn-primary"
             onClick={() => setScriptOpen(true)}
             disabled={selected.size === 0}
             title={
@@ -581,7 +591,7 @@ export default function Reclaim({
                 : undefined
             }
           >
-            Deletion script…
+            Create cleanup script…
           </button>
         </div>
       </div>
@@ -591,6 +601,7 @@ export default function Reclaim({
           items={selectedItems}
           root={report.root}
           home={home}
+          os={os}
           onClose={() => setScriptOpen(false)}
           onToast={onToast}
         />
@@ -606,15 +617,18 @@ function ScriptModal({
   items,
   root,
   home,
+  os,
   onClose,
   onToast,
 }: {
   items: ReclaimExportItem[];
   root: string;
   home: string;
+  os: OsId;
   onClose: () => void;
   onToast: (msg: string, danger?: boolean) => void;
 }) {
+  const platform = usePlatform();
   const [mode, setMode] = useState<ScriptMode>("trash");
 
   useEffect(() => {
@@ -634,10 +648,11 @@ function ScriptModal({
       generatedAt: new Date().toISOString(),
       appVersion: APP_VERSION,
       home,
+      os,
     };
     return deletionScript(items, meta, mode);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [items, root, home, mode]);
+  }, [items, root, home, os, mode]);
 
   const totalBytes = result.included.reduce((s, i) => s + i.size, 0);
 
@@ -645,8 +660,8 @@ function ScriptModal({
     try {
       await copyText(result.script);
       onToast(
-        "Deletion script copied to the clipboard. Save and run it yourself in " +
-          "Terminal — it previews only until you pass --yes, and DiskAudit " +
+        `Cleanup script copied to the clipboard. Save it and run it yourself in ${platform.terminal} — ` +
+          "it previews only until you pass --yes, and DiskAudit " +
           "itself never runs or saves it.",
         true
       );
@@ -661,12 +676,12 @@ function ScriptModal({
       <div
         className="list-panel reclaim-modal"
         role="dialog"
-        aria-label="Generate deletion script"
+        aria-label="Create cleanup script"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="list-header">
           <div className="list-title">
-            <div className="list-title-name">Generate deletion script</div>
+            <div className="list-title-name">Create cleanup script</div>
             <div className="list-title-path">
               {formatNumber(result.included.length)} item
               {result.included.length === 1 ? "" : "s"} · would free ≈{" "}
@@ -687,9 +702,12 @@ function ScriptModal({
                 onChange={() => setMode("trash")}
               />
               <div>
-                <div className="reclaim-mode-title">Move to Trash</div>
+                <div className="reclaim-mode-title">
+                  Move to {platform.trash}
+                </div>
                 <div className="reclaim-mode-sub">
-                  Recoverable until you empty the Trash. The safe default.
+                  Recoverable until you empty the {platform.trash}. The safe
+                  default.
                 </div>
               </div>
             </label>
@@ -703,7 +721,7 @@ function ScriptModal({
               <div>
                 <div className="reclaim-mode-title">Delete permanently</div>
                 <div className="reclaim-mode-sub">
-                  rm -rf — no Trash, no undo. Only if you're sure.
+                  No {platform.trash}, no undo. Only if you're sure.
                 </div>
               </div>
             </label>
@@ -757,7 +775,7 @@ function ScriptModal({
             onClick={copyScript}
             disabled={result.included.length === 0}
           >
-            Copy {mode === "rm" ? "permanent-delete" : "move-to-Trash"} script
+            Copy {mode === "rm" ? "permanent-delete" : `move-to-${platform.trash}`} script
           </button>
         </div>
       </div>

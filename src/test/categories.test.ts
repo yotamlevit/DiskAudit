@@ -4,7 +4,9 @@ import {
   categorize,
   categoryColor,
   categoryForExt,
+  categoryStyleSheet,
   colorForExt,
+  inkOn,
   isCategory,
 } from "../categories";
 import defs from "../categories.json";
@@ -53,6 +55,25 @@ describe("category table (single source of truth)", () => {
   test("colors are consistent across lookup paths", () => {
     expect(colorForExt("mp4")).toBe(categoryColor("x.mp4"));
     expect(categoryForExt("")).toBe("noext");
-    expect(colorForExt("")).toBe(CATEGORIES.noext.color);
+    expect(colorForExt("")).toBe("var(--cat-noext)");
+  });
+
+  test("eight hues and two neutrals — never a ninth colour", () => {
+    // More hues than this cannot stay distinguishable (see categories.ts);
+    // new file kinds must join an existing category.
+    expect(Object.keys(CATEGORIES).length).toBe(10);
+  });
+
+  test("every category has a light and a dark step, and readable ink", () => {
+    for (const def of Object.values(CATEGORIES)) {
+      expect(def.color).toMatch(/^#[0-9a-f]{6}$/);
+      expect(def.colorDark).toMatch(/^#[0-9a-f]{6}$/);
+    }
+    expect(inkOn("#ffffff")).toBe("#111827");
+    expect(inkOn("#0e3d7e")).toBe("#ffffff");
+    const css = categoryStyleSheet();
+    expect(css).toContain("--cat-video:#f47230");
+    expect(css).toContain("--cat-video-ink:");
+    expect(css).toContain("prefers-color-scheme: dark");
   });
 });

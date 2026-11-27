@@ -5,6 +5,7 @@
 // Never bundled into production (see ipc.ts).
 
 import type {
+  OsId,
   DirListing,
   DirEntry,
   ProgressPayload,
@@ -478,9 +479,9 @@ function mockStats() {
   // Categories roughly via extension buckets (good enough for the mock).
   const catOf: Record<string, string> = {
     mp4: "video", mov: "video", jpg: "image", png: "image", heic: "image",
-    mp3: "audio", zip: "archive", dmg: "diskimage", pdf: "document",
-    docx: "document", ts: "code", rs: "code", json: "text", txt: "text",
-    log: "text", db: "data", dylib: "binary", ttf: "font", "": "noext",
+    mp3: "audio", zip: "archive", dmg: "archive", pdf: "document",
+    docx: "document", ts: "code", rs: "code", json: "code", txt: "code",
+    log: "code", db: "data", dylib: "binary", ttf: "binary", "": "noext",
     dat: "other",
   };
   for (const [ext, v] of byExt) {
@@ -502,10 +503,52 @@ function mockStats() {
   };
 }
 
+// The mock can impersonate each OS: open the dev server with ?os=windows or
+// ?os=linux to see that platform's wording, shortcuts and units. In Windows
+// mode every path crossing the mock boundary is rewritten to `C:\…` form
+// (and back on the way in), so the UI's path handling is exercised too.
+function mockOs(): OsId {
+  const q =
+    typeof window !== "undefined"
+      ? new URLSearchParams(window.location.search).get("os")
+      : null;
+  return q === "windows" || q === "linux" ? q : "macos";
+}
+const toWin = (p: string) => "C:" + p.replaceAll("/", "\\");
+const fromWin = (p: string) => p.replace(/^[A-Za-z]:/, "").replaceAll("\\", "/");
+const toLinux = (p: string) => p.replace(/^\/Users\//, "/home/");
+const fromLinux = (p: string) => p.replace(/^\/home\//, "/Users/");
+
+/** Rewrite every mock path inside a payload (strings starting /Users/). */
+function mapPaths<V>(value: V, f: (p: string) => string): V {
+  if (typeof value === "string") {
+    return (value.startsWith("/Users/") ? f(value) : value) as unknown as V;
+  }
+  if (Array.isArray(value)) return value.map((v) => mapPaths(v, f)) as unknown as V;
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([k, v]) => [k, mapPaths(v, f)])
+    ) as V;
+  }
+  return value;
+}
+
 async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  const os = mockOs();
+  if (os === "macos") return mockInvokePosix<T>(cmd, args);
+  const [out, back] = os === "windows" ? [toWin, fromWin] : [toLinux, fromLinux];
+  const inArgs = args
+    ? Object.fromEntries(
+        Object.entries(args).map(([k, v]) => [k, typeof v === "string" && k === "path" ? back(v) : v])
+      )
+    : args;
+  return mapPaths(await mockInvokePosix<T>(cmd, inArgs), out);
+}
+
+async function mockInvokePosix<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   switch (cmd) {
-    case "home_dir":
-      return "/Users/you" as unknown as T;
+    case "platform_info":
+      return { os: mockOs(), home: "/Users/you" } as unknown as T;
     case "start_scan": {
       scanId += 1;
       scanDone = false;
@@ -527,7 +570,10 @@ async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>): Promi
           errors: frac > 0.6 ? 12 : 0,
           current: `/Users/you/Library/Caches/step-${i}`,
         };
-        listeners.forEach((l) => l({ payload }));
+        const os = mockOs();
+        const shown =
+          os === "windows" ? mapPaths(payload, toWin) : os === "linux" ? mapPaths(payload, toLinux) : payload;
+        listeners.forEach((l) => l({ payload: shown }));
       }
       scanDone = true;
       return summary() as unknown as T;
@@ -602,9 +648,9 @@ async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>): Promi
       const catFilter = (args?.category as string | null) ?? null;
       const catOfExt: Record<string, string> = {
         mp4: "video", mov: "video", jpg: "image", png: "image", heic: "image",
-        mp3: "audio", zip: "archive", dmg: "diskimage", pdf: "document",
-        docx: "document", ts: "code", rs: "code", json: "text", txt: "text",
-        log: "text", db: "data", dylib: "binary", ttf: "font", "": "noext",
+        mp3: "audio", zip: "archive", dmg: "archive", pdf: "document",
+        docx: "document", ts: "code", rs: "code", json: "code", txt: "code",
+        log: "code", db: "data", dylib: "binary", ttf: "binary", "": "noext",
       };
       const hits: SearchHit[] = [];
       const visit = (n: MockNode) => {
@@ -635,7 +681,7 @@ async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>): Promi
 
 export const mockIpc = {
   revealItem: async (path: string) => {
-    console.log("[mock] reveal in Finder:", path);
+    console.log("[mock] reveal in file manager:", path);
   },
   copyText: async (text: string) => {
     console.log("[mock] copy to clipboard:", text);

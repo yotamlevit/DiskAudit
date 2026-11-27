@@ -1,25 +1,37 @@
 // DiskAudit — read-only disk usage scanner.
 //
-// SECURITY INVARIANT (audited):
-// This crate must NEVER perform filesystem mutation. Allowed APIs are
+// This crate is the Tauri command layer; the scanner, store and reclaim
+// detector live in the `diskaudit-core` crate (./core), which has no UI
+// dependency and is compiled and tested on macOS, Windows and Linux.
+//
+// SECURITY INVARIANT (audited) — covers BOTH crates:
+// Neither crate may EVER perform filesystem mutation. Allowed APIs are
 // strictly: std::fs::metadata, std::fs::symlink_metadata, std::fs::read_dir,
-// Path::canonicalize, jwalk traversal (which only reads), and — added for
-// duplicate detection, reclaim.rs ONLY — std::fs::File::open in read mode to
-// hash file contents. That last one is a deliberate, audited expansion of
-// the I/O surface: it opens with File::open (never OpenOptions), reads
-// bytes, and does nothing else with the handle. Forbidden everywhere:
-// fs::write, fs::remove_*, fs::rename, fs::create_dir*, fs::set_permissions,
-// OpenOptions with .write/.create/.append, std::process::Command, any libc
-// calls that mutate.
+// Path::canonicalize, std::path::absolute, jwalk traversal (which only
+// reads), and two audited expansions of the I/O surface:
+//   1. Duplicate detection, core/src/reclaim.rs ONLY — std::fs::File::open
+//      in read mode to hash file contents. It reads bytes and does nothing
+//      else with the handle.
+//   2. Windows metadata, core/src/platform/windows.rs ONLY — OpenOptions
+//      with access_mode(FILE_READ_ATTRIBUTES) and nothing else (no read,
+//      write, create, append or truncate), to query a file's allocation
+//      size and identity. This is the handle std::fs::metadata itself opens
+//      on Windows; it cannot read or change file data. The two Win32 calls
+//      made on it (GetFileInformationByHandle[Ex]) are queries.
+// Forbidden everywhere: fs::write, fs::remove_*, fs::rename,
+// fs::create_dir*, fs::set_permissions, OpenOptions with
+// .write/.create/.append/.truncate, std::process::Command, and any libc or
+// Win32 call that mutates.
 //
 // Plugin surface (see capabilities/default.json for the frontend grants,
 // each justified there):
 //   * dialog        — folder picker (open only).
-//   * opener        — reveal-in-Finder (NSWorkspace "select in Finder") and
-//                     opening the Full Disk Access settings pane URL. It
-//                     never launches shells or arbitrary programs, and no
-//                     app code passes it anything but a scanned path or the
-//                     fixed settings URL.
+//   * opener        — reveal in the file manager (Finder / File Explorer /
+//                     the desktop's file manager via its D-Bus interface)
+//                     and, on macOS, opening the Full Disk Access settings
+//                     pane URL. It never launches shells or arbitrary
+//                     programs, and no app code passes it anything but a
+//                     scanned path or that fixed settings URL.
 //   * clipboard-manager — WRITE-only ("Copy path" / "Copy delete command",
 //                     and the Reclaimable tab's exports and generated
 //                     deletion scripts). The app never reads the clipboard.
@@ -34,18 +46,15 @@
 // None of these mutate the scanned filesystem.
 //
 // Test-only code (#[cfg(test)]) builds fixture trees under the OS temp dir
-// (including one /bin/cp -c invocation to create an APFS clone fixture);
+// (including one /bin/cp -c invocation, macOS only, to create an APFS clone
+// fixture);
 // none of it is compiled into the shipped app.
 
-mod categories;
-#[doc(hidden)]
-pub mod devtool;
-mod platform;
-mod reclaim;
-mod scanner;
-
+use diskaudit_core::scanner::{
+    DirListing, ProgressCb, ScanDone, ScanShared, SearchHit, SearchQuery, ViewPayload,
+};
+use diskaudit_core::{platform, reclaim, scanner};
 use parking_lot::Mutex;
-use scanner::{DirListing, ProgressCb, ScanDone, ScanShared, SearchHit, SearchQuery, ViewPayload};
 use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -88,8 +97,7 @@ async fn start_scan(
     state: State<'_, AppState>,
     path: String,
 ) -> Result<ScanDone, String> {
-    let path_buf = PathBuf::from(&path);
-    let mut canonical = path_buf.canonicalize().unwrap_or(path_buf);
+    let mut canonical = platform::resolve_root(&PathBuf::from(&path));
     let md = std::fs::metadata(&canonical)
         .map_err(|e| format!("Cannot access {}: {}", canonical.to_string_lossy(), e))?;
     if !md.is_dir() {
@@ -414,11 +422,12 @@ fn cancel_dup_scan(state: State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
+/// Host facts the UI adapts to: OS family (wording, shortcuts, which shell
+/// generated scripts target) and the home directory (default scan path,
+/// protected-path checks).
 #[tauri::command]
-fn home_dir() -> Result<String, String> {
-    platform::home_dir()
-        .map(|p| p.to_string_lossy().to_string())
-        .ok_or_else(|| "HOME not set".to_string())
+fn platform_info() -> platform::PlatformInfo {
+    platform::info()
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -441,34 +450,27 @@ pub fn run() {
             get_reclaim,
             start_dup_scan,
             cancel_dup_scan,
-            home_dir
+            platform_info
         ])
         .setup(|app| {
-            // Standard macOS menu bar. The Edit submenu is what makes
-            // ⌘C/⌘V/⌘A work in the path and search inputs.
+            // Menu bar. On macOS the Edit submenu is what makes ⌘C/⌘V/⌘A
+            // work in the path and search inputs, and the app submenu is
+            // expected; Windows and Linux get File/Edit/View/Window in the
+            // window, with Quit under File where those platforms put it.
             let open_item = MenuItemBuilder::with_id("open-folder", "Open Folder…")
                 .accelerator("CmdOrCtrl+O")
                 .build(app)?;
             let rescan_item = MenuItemBuilder::with_id("rescan", "Rescan")
                 .accelerator("CmdOrCtrl+R")
                 .build(app)?;
-            let app_menu = SubmenuBuilder::new(app, "DiskAudit")
-                .about(None)
-                .separator()
-                .services()
-                .separator()
-                .hide()
-                .hide_others()
-                .show_all()
-                .separator()
-                .quit()
-                .build()?;
             let file_menu = SubmenuBuilder::new(app, "File")
                 .item(&open_item)
                 .item(&rescan_item)
                 .separator()
-                .close_window()
-                .build()?;
+                .close_window();
+            #[cfg(not(target_os = "macos"))]
+            let file_menu = file_menu.quit();
+            let file_menu = file_menu.build()?;
             let edit_menu = SubmenuBuilder::new(app, "Edit")
                 .undo()
                 .redo()
@@ -483,8 +485,23 @@ pub fn run() {
                 .minimize()
                 .maximize()
                 .build()?;
-            let menu = MenuBuilder::new(app)
-                .items(&[&app_menu, &file_menu, &edit_menu, &view_menu, &window_menu])
+            let menu = MenuBuilder::new(app);
+            #[cfg(target_os = "macos")]
+            let menu = menu.item(
+                &SubmenuBuilder::new(app, "DiskAudit")
+                    .about(None)
+                    .separator()
+                    .services()
+                    .separator()
+                    .hide()
+                    .hide_others()
+                    .show_all()
+                    .separator()
+                    .quit()
+                    .build()?,
+            );
+            let menu = menu
+                .items(&[&file_menu, &edit_menu, &view_menu, &window_menu])
                 .build()?;
             app.set_menu(menu)?;
             app.on_menu_event(|app, event| {

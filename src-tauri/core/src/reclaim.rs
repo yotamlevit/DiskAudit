@@ -241,6 +241,8 @@ pub struct DupState {
 enum FindKind {
     AppCache,
     ToolCache,
+    PackageCache,
+    TempFiles,
     Xcode,
     XcodeArchive,
     IosBackup,
@@ -356,14 +358,15 @@ fn under_always_artifact(rel: &Path) -> bool {
 
 fn installer_ext(name: &str) -> bool {
     let lower = name.to_lowercase();
-    [".dmg", ".pkg", ".xip", ".ipsw"]
+    platform::installer_exts()
         .iter()
         .any(|e| lower.ends_with(e) && lower.len() > e.len())
 }
 
 /// True if any directory component of `rel` (the path below the scan root,
-/// excluding the file itself) looks like a macOS package (dot in the name,
-/// not at position 0: Foo.app, Photos.photoslibrary, backup.2020…).
+/// excluding the file itself) looks like a package or bundle (dot in the
+/// name, not at position 0: Foo.app, Photos.photoslibrary, backup.2020…).
+/// A macOS idea, applied everywhere: it only ever makes the hint quieter.
 fn under_packagelike_dir(rel: &Path) -> bool {
     let mut comps: Vec<_> = rel.components().collect();
     comps.pop();
@@ -371,10 +374,6 @@ fn under_packagelike_dir(rel: &Path) -> bool {
         let s = c.as_os_str().to_string_lossy();
         s.char_indices().any(|(i, ch)| ch == '.' && i > 0)
     })
-}
-
-fn has_library_component(rel: &Path) -> bool {
-    rel.components().any(|c| c.as_os_str() == "Library")
 }
 
 fn name_of(path: &Path) -> String {
@@ -538,7 +537,18 @@ pub fn detect(shared: &ScanShared, now: i64) -> Detection {
             ),
             ReclaimKind::Trash => (
                 FindKind::Trash,
-                "Already sent to the Trash — emptying is permanent".to_string(),
+                format!(
+                    "Already sent to the {} — emptying is permanent",
+                    platform::trash_name()
+                ),
+            ),
+            ReclaimKind::PackageCache => (
+                FindKind::PackageCache,
+                "Downloaded packages and updates — fetched again if ever needed".to_string(),
+            ),
+            ReclaimKind::TempFiles => (
+                FindKind::TempFiles,
+                "Temporary files left behind by apps and installers".to_string(),
             ),
             // Self-findings never carry these kinds today, but stay total.
             ReclaimKind::AppCache => (
@@ -579,6 +589,10 @@ pub fn detect(shared: &ScanShared, now: i64) -> Detection {
                 ReclaimKind::IosBackup => (
                     FindKind::IosBackup,
                     "Backup of an iOS device — gone forever once deleted".to_string(),
+                ),
+                ReclaimKind::TempFiles => (
+                    FindKind::TempFiles,
+                    "Temporary files left behind by apps and installers".to_string(),
                 ),
                 _ => (FindKind::AppCache, "Cache".to_string()),
             };
@@ -646,9 +660,10 @@ pub fn detect(shared: &ScanShared, now: i64) -> Detection {
         });
     }
 
-    // Stale: strictly a hint, with aggressive exclusions. Anything under a
-    // Library, inside a package-like folder (Foo.app, *.photoslibrary), or
-    // already covered by another finding is NOT flagged.
+    // Stale: strictly a hint, with aggressive exclusions. Anything in
+    // app-managed or system territory (platform::stale_excluded), inside a
+    // package-like folder (Foo.app, *.photoslibrary), or already covered by
+    // another finding is NOT flagged.
     let mut stale_findings: Vec<RawFinding> = Vec::new();
     for f in big_files {
         if f.mtime <= 0 || now - f.mtime < STALE_MIN_AGE_DAYS * DAY_SECS {
@@ -661,7 +676,7 @@ pub fn detect(shared: &ScanShared, now: i64) -> Detection {
         let Ok(rel) = full.strip_prefix(root) else {
             continue;
         };
-        if has_library_component(rel) || under_packagelike_dir(rel) {
+        if platform::stale_excluded(root, rel) || under_packagelike_dir(rel) {
             continue;
         }
         stale_findings.push(RawFinding {
@@ -706,6 +721,20 @@ fn group_meta(kind: FindKind) -> GroupMeta {
             blurb: "Package managers re-download whatever the next build needs.",
             class: ReclaimClass::Regenerable,
         },
+        FindKind::PackageCache => GroupMeta {
+            kind: "package_cache",
+            label: "System package caches",
+            blurb: "Packages and updates the system already installed. Best cleared with \
+                    the system's own cleanup tool; deleting usually needs admin rights.",
+            class: ReclaimClass::Regenerable,
+        },
+        FindKind::TempFiles => GroupMeta {
+            kind: "temp_files",
+            label: "Temporary files",
+            blurb: "Leftovers from apps and installers. Not recreated — close running \
+                    apps and finish pending installs before deleting.",
+            class: ReclaimClass::Disposable,
+        },
         FindKind::Xcode => GroupMeta {
             kind: "xcode",
             label: "Xcode regenerable data",
@@ -720,7 +749,7 @@ fn group_meta(kind: FindKind) -> GroupMeta {
         },
         FindKind::Trash => GroupMeta {
             kind: "trash",
-            label: "Trash",
+            label: platform::trash_name(),
             blurb: "Already deleted once. Emptying is permanent.",
             class: ReclaimClass::Disposable,
         },
@@ -749,7 +778,7 @@ fn group_meta(kind: FindKind) -> GroupMeta {
             kind: "stale",
             label: "Stale large files",
             blurb: "Big files untouched for over a year — judged by modification time, \
-                    because access times are unreliable on macOS. Review before acting.",
+                    because access times are unreliable. Review before acting.",
             class: ReclaimClass::Stale,
         },
     }
@@ -1227,6 +1256,9 @@ fn read_fully(f: &mut std::fs::File, buf: &mut [u8]) -> std::io::Result<usize> {
     Ok(filled)
 }
 
+#[cfg(all(test, unix))]
+#[path = "reclaim_synth_tests.rs"]
+mod synth_tests;
 #[cfg(test)]
 #[path = "reclaim_tests.rs"]
 mod tests;

@@ -11,10 +11,12 @@
 //     making later view queries O(view size).
 //
 // Size accounting (deliberate policy — see README):
-//   * `size` is ALLOCATED bytes (st_blocks * 512): what deleting the file
-//     would actually free. Sparse files count their real blocks, not their
-//     logical length. The logical total is tracked separately for the summary.
-//   * Hardlinks are deduplicated by (device, inode): the first path seen
+//   * `size` is ALLOCATED bytes (st_blocks * 512 on Unix, the NTFS
+//     allocation size on Windows — see platform::stat_file): what deleting
+//     the file would actually free. Sparse and compressed files count their
+//     real footprint, not their logical length. The logical total is
+//     tracked separately for the summary.
+//   * Hardlinks are deduplicated by (volume, file id): the first path seen
 //     carries the size, other links show 0 bytes. The deduplicated amount is
 //     reported in the summary. (Which path "wins" depends on walk order.)
 //   * APFS clones are NOT deduplicated — macOS offers no public API to detect
@@ -32,12 +34,11 @@
 //   * stat failure on a file: counted where the metadata call fails.
 
 use crate::categories::category_for_ext;
-use crate::platform::{ScanPolicy, SkipReason};
+use crate::platform::{self, ScanPolicy, SkipReason};
 use dashmap::{DashMap, DashSet};
 use parking_lot::Mutex;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -94,7 +95,8 @@ pub struct FileRec {
     /// `size`, which is deliberately 0 for hardlink dupes and stat failures.
     pub logical: u64,
     /// Modification time, unix seconds (0 when unknown). Access times are
-    /// unreliable on macOS (noatime mounts), so mtime is the staleness signal.
+    /// unreliable everywhere (noatime / relatime mounts, off by default on
+    /// NTFS), so mtime is the staleness signal.
     pub mtime: i64,
     pub is_symlink: bool,
     /// st_nlink > 1: deleting this one path frees nothing while other links
@@ -380,7 +382,7 @@ pub fn walk(shared: &Arc<ScanShared>, policy: Arc<ScanPolicy>, on_progress: Arc<
         .entry(root.clone())
         .or_insert_with(|| Mutex::new(DirAcc::new(shared.root_name.clone())));
 
-    // (device, inode) pairs already counted, for hardlink dedup.
+    // (volume, file id) pairs already counted, for hardlink dedup.
     let seen_inodes: Arc<DashSet<(u64, u64)>> = Arc::new(DashSet::new());
 
     let shared_w = shared.clone();
@@ -426,11 +428,7 @@ pub fn walk(shared: &Arc<ScanShared>, policy: Arc<ScanPolicy>, on_progress: Arc<
                         if ft.is_symlink() {
                             // Never followed; the link itself occupies ~0
                             // allocated bytes but is still recorded.
-                            let size = entry
-                                .metadata()
-                                .ok()
-                                .map(|md| md.blocks() * 512)
-                                .unwrap_or(0);
+                            let size = platform::link_alloc(&entry.path());
                             local_symlinks += 1;
                             local_size += size;
                             local_files.push(FileRec {
@@ -441,7 +439,11 @@ pub fn walk(shared: &Arc<ScanShared>, policy: Arc<ScanPolicy>, on_progress: Arc<
                             });
                         } else if ft.is_dir() {
                             let child_path = entry.path();
-                            let dev = entry.metadata().ok().map(|md| md.dev());
+                            let dev = if policy_w.wants_devices() {
+                                platform::dir_device(&child_path)
+                            } else {
+                                None
+                            };
                             let skip = policy_w.skip_reason(&child_path, dev);
                             shared_w.dirs.entry(child_path.clone()).or_insert_with(|| {
                                 Mutex::new(match skip {
@@ -457,25 +459,26 @@ pub fn walk(shared: &Arc<ScanShared>, policy: Arc<ScanPolicy>, on_progress: Arc<
                         } else {
                             // Regular files, plus rare others (sockets,
                             // FIFOs) which report 0 blocks anyway.
-                            match entry.metadata() {
+                            match platform::stat_file(&entry.path()) {
                                 Ok(md) => {
-                                    let alloc = md.blocks() * 512;
-                                    let counted =
-                                        if md.nlink() > 1 && !seen_w.insert((md.dev(), md.ino())) {
-                                            local_hl_saved += alloc;
-                                            0
-                                        } else {
-                                            alloc
-                                        };
+                                    let hardlinked = md.nlink > 1;
+                                    let already_counted =
+                                        hardlinked && md.id.is_some_and(|id| !seen_w.insert(id));
+                                    let counted = if already_counted {
+                                        local_hl_saved += md.alloc;
+                                        0
+                                    } else {
+                                        md.alloc
+                                    };
                                     local_size += counted;
-                                    local_logical += md.len();
+                                    local_logical += md.logical;
                                     local_files.push(FileRec {
                                         name: fname,
                                         size: counted,
-                                        logical: md.len(),
-                                        mtime: md.mtime(),
+                                        logical: md.logical,
+                                        mtime: md.mtime,
                                         is_symlink: false,
-                                        hardlinked: md.nlink() > 1,
+                                        hardlinked,
                                     });
                                 }
                                 Err(_) => {
@@ -1239,6 +1242,9 @@ pub fn search(shared: &ScanShared, q: &SearchQuery) -> Vec<SearchHit> {
     hits
 }
 
+#[cfg(all(test, unix))]
+#[path = "scanner_synth_tests.rs"]
+mod synth_tests;
 #[cfg(test)]
 #[path = "scanner_tests.rs"]
 mod tests;
